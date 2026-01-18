@@ -22,7 +22,7 @@ from config import (
 )
 from faiss_utils.setup_faiss_vdb import FaissVectorDB
 from pi2vec.train_regressor import load_model
-from policy_reusability.data_generation.gridworld_factory import init_gridworld_rand
+from policy_reusability.data_generation.tabular.gridworld_factory import init_gridworld_rand
 
 # Load environment variables
 load_dotenv()

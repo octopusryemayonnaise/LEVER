@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from policy_reusability.DAG import DAG
 from policy_reusability.agents.q_agent import QLearningAgent, SarsaAgent
-from policy_reusability.data_generation.gridworld_factory import init_gridworld_rand
+from policy_reusability.data_generation.tabular.gridworld_factory import init_gridworld_rand
 from policy_reusability.inference_q import inference_q
 from policy_reusability.utilities import plot_cummulative_reward
 

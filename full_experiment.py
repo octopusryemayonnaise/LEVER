@@ -46,7 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pi2vec.pi2vec_utils import create_canonical_states, state_to_vector
 from pi2vec.train_successor import train_and_save_successor_model
 from policy_reusability.env.gridworld import GridWorld
-from policy_reusability.data_generation.gridworld_factory import init_gridworld_rand
+from policy_reusability.data_generation.tabular.gridworld_factory import init_gridworld_rand
 from policy_reusability.pruning import run_pruning_multi
 from search_faiss_policies import PolicyRetriever
 

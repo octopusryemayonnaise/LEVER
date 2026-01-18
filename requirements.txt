@@ -13,4 +13,5 @@ matplotlib
 pulp
 networkx
 gym
+gymnasium
 

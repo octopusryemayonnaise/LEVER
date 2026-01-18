@@ -14,11 +14,13 @@ composes or selects policies at inference time from natural-language queries.
 # Conda (recommended)
 conda create -n lever python=3.12
 conda activate lever
+pip install -e .
 pip install -r requirements.txt
 
 # or venv
 python3.12 -m venv .venv
 source .venv/bin/activate
+pip install -e .
 pip install -r requirements.txt
 ```
 
@@ -32,14 +34,14 @@ systems and seeds.
 
 Example for 16x16 (default):
 ```bash
-python policy_reusability/data_generation/generate_states_batch.py \
+python policy_reusability/data_generation/tabular/generate_states_batch.py \
   --output-root state_runs
 ```
 
 Example for 32x32 (same number of interactive items as 16x16 so the structured
 state vector has identical shape and the same regressor can be reused):
 ```bash
-python policy_reusability/data_generation/generate_states_batch.py \
+python policy_reusability/data_generation/tabular/generate_states_batch.py \
   --output-root state_runs_32 \
   --spec-set grid32
 ```
@@ -101,7 +103,7 @@ and 32x32 grids.
 
 1) Generate 16x16 policies:
 ```bash
-python policy_reusability/data_generation/generate_states_batch.py \
+python policy_reusability/data_generation/tabular/generate_states_batch.py \
   --output-root state_runs
 ```
 
@@ -145,7 +147,7 @@ python full_experiment.py \
 
 5) Generate 32x32 policies:
 ```bash
-python policy_reusability/data_generation/generate_states_batch.py \
+python policy_reusability/data_generation/tabular/generate_states_batch.py \
   --output-root state_runs_32 \
   --spec-set grid32
 ```
@@ -192,7 +194,9 @@ python plots/compare_compositions_average.py \
 ├── faiss_utils/               # FAISS setup + viewer
 ├── pi2vec/                    # successor features, regressor, utilities
 ├── policy_reusability/        # GridWorld env, agents, DAG utilities
-│   └── data_generation/       # grid setup + state/q-table generation scripts
+│   └── data_generation/       # data generation workflows
+│       ├── deeprl/            # deep RL assets (placeholder)
+│       └── tabular/           # tabular grid setup + state/q-table generation scripts
 ├── search_faiss_policies.py   # CLI search with decomposition/regressor/composition
 ├── pi2vec_preparation.py      # preparation entrypoint
 ├── reset_framework.py         # cleanup script

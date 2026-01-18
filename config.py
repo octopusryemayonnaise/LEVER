@@ -96,7 +96,7 @@ def get_color(index: int) -> str:
     return COLORBLIND_COLORS[index % len(COLORBLIND_COLORS)]
 
 
-# Grid generation specs used by data_generation scripts.
+# Grid generation specs used by data_generation/tabular scripts.
 # Keep separate spec sets for 16x16 and 32x32 runs.
 GRID_SPECS_16 = [
     {
