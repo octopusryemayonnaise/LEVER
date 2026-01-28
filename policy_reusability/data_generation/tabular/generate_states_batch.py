@@ -34,7 +34,7 @@ from policy_reusability.env.gridworld import GridWorld
 
 # Shared hyperparameters
 ALPHA = 0.1
-GAMMA = 0.99
+GAMMA = 0.0
 EPSILON_START = 1.0
 EPSILON_MIN = 0.01
 
@@ -220,7 +220,7 @@ def evaluate_greedy(
     env.reset().flatten()
     state_index = env.state_to_index(env.agent_position)
     total_reward = 0.0
-    max_steps = spec["grid_size"] * spec["grid_size"]
+    max_steps = 4 * spec["grid_size"] * spec["grid_size"]
     for _ in range(max_steps):
         action = int(np.argmax(q_table[state_index, :]))
         _, reward, done, _ = env.step(action)
@@ -265,7 +265,7 @@ def train_seed(
     episode_times: List[Tuple[int, float]] = []
     episode_energy: List[Tuple[int, float, float]] = []
     width = len(str(spec["episodes"] - 1))  # e.g., 6 digits for 300k
-    max_steps = spec["grid_size"] * spec["grid_size"]
+    max_steps = 4 * spec["grid_size"] * spec["grid_size"]
     cumulative_time = 0.0
     cumulative_energy_j = 0.0
     interval_energy_j = 0.0
