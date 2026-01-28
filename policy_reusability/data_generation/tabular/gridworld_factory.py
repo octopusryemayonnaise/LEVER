@@ -10,8 +10,10 @@ def init_gridworld_rand(
     width_size = grid_size
     length_size = grid_size
 
-    agent_initial_position = (0, 0)
-    target_position = (width_size - 1, length_size - 1)
+    positions = [(x, y) for x in range(width_size) for y in range(length_size)]
+    random.shuffle(positions)
+    agent_initial_position = positions[0]
+    target_position = positions[1]
 
     # Parameters controlling density
     total_cells = grid_size * grid_size - 2  # Exclude agent and target

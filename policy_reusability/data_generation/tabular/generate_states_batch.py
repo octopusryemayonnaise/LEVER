@@ -9,7 +9,7 @@ Defaults (from GRID_SPECS):
 - Rewards: path, gold, lever, hazard, hazard-lever, path-gold, path-gold-hazard, path-gold-hazard-lever
 - Episodes: varies by spec (X1=30k, X5=150k, X10=300k)
 - Max steps per episode: grid_size * grid_size
-- Actions: 4 (right, down, right x2, down x2)
+- Actions: 4 (right, down, left, up)
 - SARSA: alpha=0.1, gamma=0.99, epsilon starts at 1.0, spec-controlled decay, min 0.01
 - Snapshot every 1,000 episodes: saves episode_states.npy, episode_actions.npy,
   q_table.npy, dag.pkl; greedy evaluation reward logged to episode_rewards.csv.
@@ -35,7 +35,7 @@ from policy_reusability.env.gridworld import GridWorld
 
 # Shared hyperparameters
 ALPHA = 0.1
-GAMMA = 0.99
+GAMMA = 0.0
 EPSILON_START = 1.0
 EPSILON_MIN = 0.01
 
@@ -43,8 +43,10 @@ EPSILON_MIN = 0.01
 def sample_layout_for_seed(spec: Dict, seed: int):
     rng = random.Random(seed)
     grid_size = spec["grid_size"]
-    agent_initial_position = (0, 0)
-    target_position = (grid_size - 1, grid_size - 1)
+    positions = [(x, y) for x in range(grid_size) for y in range(grid_size)]
+    rng.shuffle(positions)
+    agent_initial_position = positions[0]
+    target_position = positions[1]
 
     total_cells = grid_size * grid_size - 2  # exclude start/target
     hazard_count = spec.get("hazards", max(1, int(total_cells * 0.05)))
@@ -105,8 +107,9 @@ def sample_layout_for_seed(spec: Dict, seed: int):
     for _ in range(max_layout_attempts):
         hazards, golds, blocks, lever = sample_layout()
         if layout_is_valid(hazards, blocks, lever):
-            return hazards, golds, blocks, lever
-    return sample_layout()
+            return hazards, golds, blocks, lever, agent_initial_position, target_position
+    hazards, golds, blocks, lever = sample_layout()
+    return hazards, golds, blocks, lever, agent_initial_position, target_position
 
 
 def init_gridworld(
@@ -119,6 +122,8 @@ def init_gridworld(
             list[tuple[int, int]],
             list[tuple[int, int]],
             tuple[int, int] | None,
+            tuple[int, int],
+            tuple[int, int],
         ]
         | None
     ) = None,
@@ -126,15 +131,29 @@ def init_gridworld(
     """Create a GridWorld of given size using a shared layout per seed."""
     grid_size = spec["grid_size"]
 
-    agent_initial_position = (0, 0)
-    target_position = (grid_size - 1, grid_size - 1)
-
     if layout is None:
-        hazard_positions, gold_positions, block_positions, lever_position = (
-            sample_layout_for_seed(spec, seed)
-        )
+        (
+            hazard_positions,
+            gold_positions,
+            block_positions,
+            lever_position,
+            agent_initial_position,
+            target_position,
+        ) = sample_layout_for_seed(spec, seed)
     else:
-        hazard_positions, gold_positions, block_positions, lever_position = layout
+        if len(layout) == 6:
+            (
+                hazard_positions,
+                gold_positions,
+                block_positions,
+                lever_position,
+                agent_initial_position,
+                target_position,
+            ) = layout
+        else:
+            hazard_positions, gold_positions, block_positions, lever_position = layout
+            agent_initial_position = (0, 0)
+            target_position = (grid_size - 1, grid_size - 1)
 
     gold_positions_list = [list(pos) for pos in gold_positions]
     block_positions_list = [list(pos) for pos in block_positions]
@@ -149,7 +168,7 @@ def init_gridworld(
     block_position_value = -1
     gold_position_value = +1
     agent_position_value = 7
-    block_reward = -1
+    block_reward = -0.1
     target_reward = +100
     hazard_penalty = 0.0
     step_penalty = 0.0
