@@ -2,7 +2,8 @@
 Generate GridWorld trajectories for all configured grid specs and reward systems.
 Each seed uses a single layout shared across reward systems.
 
-Configuration is defined in config.py via GRID_SPECS_16 and GRID_SPECS_32.
+Configuration is defined in config.py via GRID_SPECS_8, GRID_SPECS_16_SMALL,
+GRID_SPECS_16, and GRID_SPECS_32.
 
 Defaults (from GRID_SPECS):
 - Rewards: path, gold, lever, hazard, hazard-lever, path-gold, path-gold-hazard, path-gold-hazard-lever
@@ -27,14 +28,14 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from config import GRID_SPECS_16, GRID_SPECS_32
+from config import GRID_SPECS_8, GRID_SPECS_16, GRID_SPECS_16_SMALL, GRID_SPECS_32
 from policy_reusability.agents.q_agent import SarsaAgent
 from policy_reusability.DAG import DAG
 from policy_reusability.env.gridworld import GridWorld
 
 # Shared hyperparameters
 ALPHA = 0.1
-GAMMA = 0.0
+GAMMA = 0.99
 EPSILON_START = 1.0
 EPSILON_MIN = 0.01
 
@@ -412,7 +413,7 @@ def main():
     parser.add_argument(
         "--spec-set",
         type=str,
-        choices=["grid16", "grid32"],
+        choices=["grid8", "grid16_small", "grid16", "grid32"],
         default="grid16",
         help="Grid spec set to use (default: grid16)",
     )
@@ -420,6 +421,10 @@ def main():
 
     if args.spec_set == "grid32":
         grid_specs = GRID_SPECS_32
+    elif args.spec_set == "grid16_small":
+        grid_specs = GRID_SPECS_16_SMALL
+    elif args.spec_set == "grid8":
+        grid_specs = GRID_SPECS_8
     else:
         grid_specs = GRID_SPECS_16
 
