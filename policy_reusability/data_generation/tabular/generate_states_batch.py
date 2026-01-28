@@ -40,33 +40,6 @@ EPSILON_START = 1.0
 EPSILON_MIN = 0.01
 
 
-def _read_int(path: Path) -> int:
-    return int(path.read_text().strip())
-
-
-def find_rapl_package_paths():
-    rapl_root = Path("/sys/class/powercap")
-    default = rapl_root / "intel-rapl:0"
-    if (default / "energy_uj").exists():
-        return default / "energy_uj", default / "max_energy_range_uj"
-
-    candidates = sorted(rapl_root.rglob("energy_uj"))
-    if not candidates:
-        return None, None
-
-    energy_path = candidates[0]
-    max_path = energy_path.parent / "max_energy_range_uj"
-    if not max_path.exists():
-        return None, None
-    return energy_path, max_path
-
-
-def rapl_delta_uj(prev_uj: int, curr_uj: int, max_range_uj: int) -> int:
-    if curr_uj >= prev_uj:
-        return curr_uj - prev_uj
-    return (max_range_uj - prev_uj) + curr_uj
-
-
 def sample_layout_for_seed(spec: Dict, seed: int):
     rng = random.Random(seed)
     grid_size = spec["grid_size"]
@@ -122,9 +95,7 @@ def sample_layout_for_seed(spec: Dict, seed: int):
             return False
         if lever is None:
             return False
-        if not has_hazard_free_path(
-            agent_initial_position, lever, hazards, blocks
-        ):
+        if not has_hazard_free_path(agent_initial_position, lever, hazards, blocks):
             return False
         if not has_hazard_free_path(lever, target_position, hazards, blocks):
             return False
@@ -142,7 +113,15 @@ def init_gridworld(
     spec: Dict,
     reward_system: str,
     seed: int,
-    layout: tuple[list[tuple[int, int]], list[tuple[int, int]], list[tuple[int, int]], tuple[int, int] | None] | None = None,
+    layout: (
+        tuple[
+            list[tuple[int, int]],
+            list[tuple[int, int]],
+            list[tuple[int, int]],
+            tuple[int, int] | None,
+        ]
+        | None
+    ) = None,
 ) -> GridWorld:
     """Create a GridWorld of given size using a shared layout per seed."""
     grid_size = spec["grid_size"]
@@ -264,22 +243,10 @@ def train_seed(
 
     episode_rewards: List[Tuple[int, float]] = []
     episode_times: List[Tuple[int, float]] = []
-    episode_energy: List[Tuple[int, float, float]] = []
     width = len(str(spec["episodes"] - 1))  # e.g., 6 digits for 300k
     max_steps = 4 * spec["grid_size"] * spec["grid_size"]
     cumulative_time = 0.0
-    cumulative_energy_j = 0.0
-    interval_energy_j = 0.0
     interval_start_time = time.time()
-
-    energy_path, max_path = find_rapl_package_paths()
-    energy_available = energy_path is not None and max_path is not None
-    if energy_available:
-        max_range_uj = _read_int(max_path)
-        prev_energy_uj = _read_int(energy_path)
-    else:
-        max_range_uj = 0
-        prev_energy_uj = 0
 
     for episode in range(spec["episodes"]):
         episode_start = time.time()
@@ -330,14 +297,6 @@ def train_seed(
                 break
 
         cumulative_time += time.time() - episode_start
-        if energy_available:
-            curr_energy_uj = _read_int(energy_path)
-            delta_uj = rapl_delta_uj(prev_energy_uj, curr_energy_uj, max_range_uj)
-            delta_j = delta_uj / 1e6
-            cumulative_energy_j += delta_j
-            interval_energy_j += delta_j
-            prev_energy_uj = curr_energy_uj
-
         if save_snapshot and episode_dir is not None:
             np.save(
                 os.path.join(episode_dir, "episode_states.npy"),
@@ -361,12 +320,6 @@ def train_seed(
             )
             episode_rewards.append((episode, eval_reward))
             episode_times.append((episode, cumulative_time))
-            avg_power_w = 0.0
-            if energy_available:
-                interval_elapsed = max(time.time() - interval_start_time, 1e-9)
-                avg_power_w = interval_energy_j / interval_elapsed
-            episode_energy.append((episode, cumulative_energy_j, avg_power_w))
-            interval_energy_j = 0.0
             interval_start_time = time.time()
 
         # Decay epsilon
@@ -379,25 +332,18 @@ def train_seed(
     final_reward = evaluate_greedy(spec, agent.q_table, reward_system, seed, layout)
     episode_rewards.append((spec["episodes"], final_reward))
     episode_times.append((spec["episodes"], cumulative_time))
-    final_avg_power_w = 0.0
-    if energy_available:
-        final_elapsed = max(time.time() - interval_start_time, 1e-9)
-        final_avg_power_w = interval_energy_j / final_elapsed
-    episode_energy.append((spec["episodes"], cumulative_energy_j, final_avg_power_w))
 
     csv_path = os.path.join(output_dir, "episode_rewards.csv")
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["", "episode", "reward", "time", "energy_j", "avg_power_w"])
-        for idx, ((ep, rew), (_, t), (_, e_j, p_w)) in enumerate(
-            zip(episode_rewards, episode_times, episode_energy)
-        ):
+        writer.writerow(["", "episode", "reward", "time"])
+        for idx, ((ep, rew), (_, t)) in enumerate(zip(episode_rewards, episode_times)):
             rounded_rew = int(round(rew))
-            writer.writerow([idx, ep, rounded_rew, t, e_j, p_w])
+            writer.writerow([idx, ep, rounded_rew, t])
 
     # Final Q-table for convenience
     np.save(os.path.join(output_dir, "q_table_final.npy"), agent.q_table)
-    return cumulative_energy_j
+    return 0.0
 
 
 def main():
@@ -452,7 +398,6 @@ def main():
                 f"=== Training reward system: {reward_system} @ {spec['grid_size']}x{spec['grid_size']} ==="
             )
             reward_start = time.time()
-            reward_energy_j = 0.0
             for seed in seeds:
                 seed_dir = os.path.join(base_dir, reward_system, f"seed_{seed:04d}")
                 os.makedirs(seed_dir, exist_ok=True)
@@ -466,17 +411,15 @@ def main():
                 print(
                     f"GridWorld initialized ({spec['grid_size']}x{spec['grid_size']}) for seed {seed:04d}, reward {reward_system}"
                 )
-                seed_energy_j = train_seed(
+                train_seed(
                     spec=spec,
                     seed=seed,
                     reward_system=reward_system,
                     output_dir=seed_dir,
                     layout=layouts[seed],
                 )
-                reward_energy_j += seed_energy_j
             reward_elapsed = time.time() - reward_start
             training_times[reward_system] = reward_elapsed
-            training_times[f"{reward_system}_energy_j"] = reward_energy_j
             print(
                 f"Finished reward {reward_system} in {reward_elapsed / 60:.2f} minutes"
             )
