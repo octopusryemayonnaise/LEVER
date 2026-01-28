@@ -41,7 +41,8 @@ class PolicyRetriever:
         self,
         index_path="faiss_index/policy.index",
         metadata_path="faiss_index/metadata.pkl",
-        regressor_model_path="models/reward_regressor.pkl",
+        regressor_model_path="models/reward_regressor_base.pkl",
+        regressor_variant="base",
         application_name="Grid World",
         available_actions=None,
     ):
@@ -84,6 +85,14 @@ class PolicyRetriever:
             print("   Regressor scoring will not be available")
             self.regressor_model = None
         print()
+        self.regressor_variant = regressor_variant
+
+    def get_policy_embedding(self, policy_meta: dict):
+        variant_key = f"policy_embedding_{self.regressor_variant}"
+        emb = policy_meta.get(variant_key)
+        if emb is None:
+            emb = policy_meta.get("policy_embedding")
+        return emb
 
     def decompose_query(
         self,
@@ -157,7 +166,9 @@ class PolicyRetriever:
             print("   Falling back to original query")
             return [query]
 
-    async def search_decomposed_async(self, query_text, seed=None, filter_energy=False):
+    async def search_decomposed_async(
+        self, query_text, seed=None, spec=None, filter_energy=False
+    ):
         """
         Decompose query and search for each sub-query asynchronously.
         For each decomposed query, returns the policy with highest regressor score.
@@ -165,6 +176,7 @@ class PolicyRetriever:
         Args:
             query_text: Natural language query describing the desired policy
             seed: Policy seed to filter by (pre-filtering)
+            spec: Policy spec to filter by (pre-filtering)
             filter_energy: If True, filter results to minimize energy consumption
 
         Returns:
@@ -193,7 +205,7 @@ class PolicyRetriever:
                 result_dict, timing = await loop.run_in_executor(
                     executor,
                     lambda: self.vdb.search_similar_policies(
-                        sub_query, policy_seed=seed
+                        sub_query, policy_seed=seed, policy_spec=spec
                     ),
                 )
 
@@ -249,7 +261,7 @@ class PolicyRetriever:
                     scored_policies = []
                     for policy in results:
                         # Get policy_embedding from metadata
-                        policy_embedding = policy.get("policy_embedding")
+                        policy_embedding = self.get_policy_embedding(policy)
                         if policy_embedding is not None:
                             # Convert to numpy array if needed
                             if isinstance(policy_embedding, list):
@@ -296,6 +308,7 @@ class PolicyRetriever:
             "original_query": query_text,
             "decomposed_queries": decomposed_queries,
             "seed": seed,
+            "spec": spec,
             "results": search_results,
             "total_timing": {
                 "decomposition_time": decomposition_time,
@@ -305,7 +318,12 @@ class PolicyRetriever:
         }
 
     def search_with_decomposition(
-        self, query_text, seed=None, filter_energy=False, show_all_metrics=False
+        self,
+        query_text,
+        seed=None,
+        spec=None,
+        filter_energy=False,
+        show_all_metrics=False,
     ):
         """
         Decompose query and search for each sub-query (synchronous wrapper).
@@ -314,6 +332,7 @@ class PolicyRetriever:
         Args:
             query_text: Natural language query describing the desired policy
             seed: Policy seed to filter by (pre-filtering)
+            spec: Policy spec to filter by (pre-filtering)
             filter_energy: If True, filter results to minimize energy consumption
             show_all_metrics: Whether to show all metadata fields
 
@@ -326,7 +345,7 @@ class PolicyRetriever:
         try:
             result = loop.run_until_complete(
                 self.search_decomposed_async(
-                    query_text, seed=seed, filter_energy=filter_energy
+                    query_text, seed=seed, spec=spec, filter_energy=filter_energy
                 )
             )
         finally:
@@ -337,6 +356,8 @@ class PolicyRetriever:
         print(f"Original Query: '{result['original_query']}'")
         if result.get("seed"):
             print(f"Seed Filter: {result['seed']}")
+        if result.get("spec"):
+            print(f"Spec Filter: {result['spec']}")
         print("=" * 80)
         print()
 
@@ -590,7 +611,7 @@ class PolicyRetriever:
 
         return sorted_results, optimization_time
 
-    def search(self, query_text, optimize_by=None, show_all_metrics=False):
+    def search(self, query_text, optimize_by=None, show_all_metrics=False, spec=None):
         """
         Perform semantic search for policies with optional optimization.
 
@@ -603,7 +624,9 @@ class PolicyRetriever:
             Search results with policy information and timing
         """
         # Semantic search
-        results, timing = self.vdb.search_similar_policies(query_text)
+        results, timing = self.vdb.search_similar_policies(
+            query_text, policy_spec=spec
+        )
 
         # Apply optimization if requested
         optimization_time = 0
@@ -721,6 +744,11 @@ def main():
         help="Policy seed to filter by (pre-filtering before search)",
     )
     parser.add_argument(
+        "--spec",
+        type=str,
+        help="Policy spec to filter by (pre-filtering before search)",
+    )
+    parser.add_argument(
         "--filter-energy",
         action="store_true",
         help="Filter results to minimize energy consumption before regressor scoring",
@@ -747,6 +775,7 @@ def main():
     retriever.search_with_decomposition(
         args.description,
         seed=args.seed,
+        spec=args.spec,
         filter_energy=args.filter_energy,
         show_all_metrics=True,  # args.show_all,
     )

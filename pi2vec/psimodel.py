@@ -12,47 +12,57 @@ class SuccessorFeatureNetwork(nn.Module):
     def __init__(self, input_dim: int = 63, output_dim: int = 63):
         super().__init__()
 
-        # First layer: project input to output_dim (this is φ_θ(s))
-        self.first_layer = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-        )
-
-        # Second layer: project output of first layer to output_dim (this is ψ_θ^π(s))
-        self.second_layer = nn.Sequential(
-            nn.Linear(128, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-        )
-
-        # 3 layers of FC(output_dim) -> BN -> ReLU
+        # Architecture: input -> 128 -> 128 -> 128 -> 128
         self.layers = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Linear(512, 512),
-                    nn.BatchNorm1d(512),
+                    nn.Linear(input_dim if i == 0 else 128, 128),
                     nn.ReLU(),
                 )
-                for _ in range(2)
+                for i in range(3)
             ]
         )
 
         # Final linear layer outputs successor features
-        self.output_layer = nn.Linear(512, output_dim)
+        self.output_layer = nn.Linear(128, output_dim)
 
     def forward(self, s: torch.Tensor) -> torch.Tensor:
-        x = self.first_layer(s)
-        x = self.second_layer(x)
+        x = s
         for layer in self.layers:
             x = layer(x)
         return self.output_layer(x)
+
+
+class SuccessorFeatureNetworkDeep(nn.Module):
+    def __init__(self, input_dim: int = 63, output_dim: int | None = None):
+        super().__init__()
+        if output_dim is None:
+            output_dim = input_dim
+        self.layer1 = nn.Linear(input_dim, input_dim)
+        self.layer2 = nn.Linear(input_dim, input_dim)
+        self.layer3 = nn.Linear(input_dim, output_dim)
+
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
+        x = F.relu(self.layer1(s))
+        x = F.relu(self.layer2(x))
+        return self.layer3(x)
 
 
 class SuccessorFeatureModel(nn.Module):
     def __init__(self, state_dim: int = 63):
         super().__init__()
         self.network = SuccessorFeatureNetwork(
+            input_dim=state_dim, output_dim=state_dim
+        )
+
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
+        return self.network(s)
+
+
+class SuccessorFeatureModelDeep(nn.Module):
+    def __init__(self, state_dim: int = 63):
+        super().__init__()
+        self.network = SuccessorFeatureNetworkDeep(
             input_dim=state_dim, output_dim=state_dim
         )
 
@@ -141,10 +151,6 @@ def train_epoch(
         s = s.to(device)
         s_next = s_next.to(device)
 
-        # Skip batches with only 1 sample (BatchNorm requires batch_size > 1 in train mode)
-        if s.size(0) == 1:
-            continue
-
         # Forward pass and compute loss
         loss = bellman_loss(model, s, s_next, gamma)
 
@@ -155,11 +161,6 @@ def train_epoch(
 
         total_loss += loss.item()
         num_batches += 1
-        # Print loss every 100 steps
-        if (step + 1) % 100 == 0:
-            avg_loss = total_loss / num_batches
-            print(f"\nStep {step + 1}: loss={loss.item():.4f}, avg_loss={avg_loss:.4f}")
-
     return total_loss / num_batches if num_batches > 0 else 0.0
 
 

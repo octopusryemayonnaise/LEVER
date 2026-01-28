@@ -1,4 +1,5 @@
 import copy
+from collections import deque
 
 import gym
 import numpy as np
@@ -126,6 +127,83 @@ class GridWorld(gym.Env):
         self.grid[self.start_position[0]][self.start_position[1]] = (
             self.agent_position_value
         )
+        self._precompute_distance_maps()
+
+    def _precompute_distance_maps(self):
+        self._blocked_mask = np.zeros((self.grid_width, self.grid_length), dtype=bool)
+        for pos in self.block_positions or []:
+            self._blocked_mask[pos[0]][pos[1]] = True
+        for pos in self.hazard_positions or []:
+            self._blocked_mask[pos[0]][pos[1]] = True
+
+        self._dist_to_target = self._bfs_distance_map([tuple(self.target_position)])
+        if self.lever_position is not None:
+            self._dist_to_lever = self._bfs_distance_map([tuple(self.lever_position)])
+        else:
+            self._dist_to_lever = None
+
+        self._dist_to_gold = {}
+        for pos in self.gold_positions or []:
+            self._dist_to_gold[tuple(pos)] = self._bfs_distance_map([tuple(pos)])
+
+    def _bfs_distance_map(self, targets):
+        if not targets:
+            return None
+        dist = np.full((self.grid_width, self.grid_length), -1, dtype=np.int16)
+        queue = deque()
+        for x, y in targets:
+            if not (0 <= x < self.grid_width and 0 <= y < self.grid_length):
+                continue
+            if self._blocked_mask[x][y]:
+                continue
+            dist[x][y] = 0
+            queue.append((x, y))
+        while queue:
+            x, y = queue.popleft()
+            next_dist = dist[x][y] + 1
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = x + dx, y + dy
+                if (
+                    0 <= nx < self.grid_width
+                    and 0 <= ny < self.grid_length
+                    and dist[nx][ny] < 0
+                    and not self._blocked_mask[nx][ny]
+                ):
+                    dist[nx][ny] = next_dist
+                    queue.append((nx, ny))
+        return dist
+
+    def _hazard_neighbor_count(self, pos):
+        x, y = pos
+        hazard_neighbors = 0
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < self.grid_width and 0 <= ny < self.grid_length:
+                if self.grid[nx][ny] == self.hazard_position_value:
+                    hazard_neighbors += 1
+        return hazard_neighbors
+
+    @staticmethod
+    def _lookup_dist(dist_map, pos):
+        if dist_map is None:
+            return None
+        d = dist_map[pos[0], pos[1]]
+        if d < 0:
+            return None
+        return int(d)
+
+    def _min_dist_to_remaining_gold(self, pos, remaining_golds):
+        if not remaining_golds:
+            return None
+        best = None
+        for gold_pos in remaining_golds:
+            dist_map = self._dist_to_gold.get(tuple(gold_pos))
+            d = self._lookup_dist(dist_map, pos)
+            if d is None:
+                continue
+            if best is None or d < best:
+                best = d
+        return best
 
     def reset(self, new_start_position=None):
         # self.visited_count_states = np.zeros((self.grid_width, self.grid_length))
@@ -174,11 +252,11 @@ class GridWorld(gym.Env):
         # down
         elif state_2[0] == state_1[0] + 1 and state_2[1] == state_1[1]:
             return 1
-        # right x2
-        elif state_2[0] == state_1[0] and state_2[1] == state_1[1] + 2:
+        # left
+        elif state_2[0] == state_1[0] and state_2[1] == state_1[1] - 1:
             return 2
-        # down x2
-        elif state_2[0] == state_1[0] + 2 and state_2[1] == state_1[1]:
+        # up
+        elif state_2[0] == state_1[0] - 1 and state_2[1] == state_1[1]:
             return 3
         else:
             return None
@@ -201,22 +279,22 @@ class GridWorld(gym.Env):
             self.agent_position[1] += 1
         elif action == 1:  # down
             self.agent_position[0] += 1
-        elif action == 2:  # right x2
-            self.agent_position[1] += 2
-        elif action == 3:  # down x2
-            self.agent_position[0] += 2
+        elif action == 2:  # left
+            self.agent_position[1] -= 1
+        elif action == 3:  # up
+            self.agent_position[0] -= 1
         else:
             print(f"Action {action} not defined!")
 
         # check boundary constraint of the grid world
         if not self.check_boundry_constraint():
             self.agent_position = prev_agent_position
-            return self.grid, -1.0, False, {}
+            return self.grid, self.block_reward, False, {}
 
         current_cell_value = self.grid[self.agent_position[0]][self.agent_position[1]]
         if current_cell_value == self.block_position_value:
             self.agent_position = prev_agent_position
-            return self.grid, -1.0, False, {}
+            return self.grid, self.block_reward, False, {}
         if current_cell_value == self.hazard_position_value:
             self.hazard_steps += 1
             # update observation space
@@ -267,6 +345,7 @@ class GridWorld(gym.Env):
             return self.block_reward
 
         reward_total = 0.0
+        remaining_golds = []
 
         # Lever handling (one-time reward if applicable)
         if (
@@ -281,21 +360,87 @@ class GridWorld(gym.Env):
 
         # Gold reward (only for gold objective)
         if use_gold:
+            remaining_golds = [
+                pos
+                for pos in (self.gold_positions or [])
+                if self.grid[pos[0]][pos[1]] == self.gold_position_value
+            ]
+            if remaining_golds:
+                # Dense shaping: reward moves toward the nearest remaining gold.
+                prev_dist = self._min_dist_to_remaining_gold(
+                    prev_agent_position, remaining_golds
+                )
+                curr_dist = self._min_dist_to_remaining_gold(
+                    self.agent_position, remaining_golds
+                )
+                if prev_dist is not None and curr_dist is not None:
+                    reward_total += prev_dist - curr_dist
+            elif not use_path and (
+                (not use_lever)
+                or self.lever_collected
+                or self.lever_position is None
+            ):
+                # After collecting all gold, guide toward exit when not path-driven.
+                prev_dist = self._lookup_dist(
+                    self._dist_to_target, prev_agent_position
+                )
+                curr_dist = self._lookup_dist(self._dist_to_target, self.agent_position)
+                if prev_dist is not None and curr_dist is not None:
+                    reward_total += prev_dist - curr_dist
             reward_total += self.get_reward_gold(
                 current_cell_value=current_cell_value,
                 reward_per_gold=5,
             )
+        elif current_cell_value == self.gold_position_value:
+            # Auto-collect gold without reward when gold is not an objective.
+            self.get_reward_gold(
+                current_cell_value=current_cell_value,
+                reward_per_gold=0,
+            )
 
-        # Hazard proximity penalty (4-neighborhood)
+        # Lever shaping toward lever until collected, then toward exit if needed.
+        if use_lever:
+            if self.lever_position is not None and not self.lever_collected:
+                prev_dist = self._lookup_dist(
+                    self._dist_to_lever, prev_agent_position
+                )
+                curr_dist = self._lookup_dist(self._dist_to_lever, self.agent_position)
+                if prev_dist is not None and curr_dist is not None:
+                    reward_total += prev_dist - curr_dist
+            elif not use_path:
+                prev_dist = self._lookup_dist(
+                    self._dist_to_target, prev_agent_position
+                )
+                curr_dist = self._lookup_dist(self._dist_to_target, self.agent_position)
+                if prev_dist is not None and curr_dist is not None:
+                    reward_total += prev_dist - curr_dist
+
+        # Hazard shaping: encourage exit progress when not path/goal-driven.
+        if use_hazard and not use_path:
+            if (not use_gold or not remaining_golds) and (
+                (not use_lever)
+                or self.lever_collected
+                or self.lever_position is None
+            ):
+                prev_dist = self._lookup_dist(
+                    self._dist_to_target, prev_agent_position
+                )
+                curr_dist = self._lookup_dist(self._dist_to_target, self.agent_position)
+                if prev_dist is not None and curr_dist is not None:
+                    reward_total += prev_dist - curr_dist
+
+        # Path shaping toward the exit (dense signal).
+        if use_path:
+            prev_dist = self._lookup_dist(self._dist_to_target, prev_agent_position)
+            curr_dist = self._lookup_dist(self._dist_to_target, self.agent_position)
+            if prev_dist is not None and curr_dist is not None:
+                reward_total += prev_dist - curr_dist
+
+        # Hazard proximity shaping (delta in 4-neighborhood)
         if use_hazard:
-            x, y = self.agent_position
-            hazard_neighbors = 0
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < self.grid_width and 0 <= ny < self.grid_length:
-                    if self.grid[nx][ny] == self.hazard_position_value:
-                        hazard_neighbors += 1
-            reward_total -= 2.0 * hazard_neighbors
+            prev_hazard_neighbors = self._hazard_neighbor_count(prev_agent_position)
+            curr_hazard_neighbors = self._hazard_neighbor_count(self.agent_position)
+            reward_total += 2.0 * (prev_hazard_neighbors - curr_hazard_neighbors)
 
         # Exit reward
         if current_cell_value == self.target_position_value:
@@ -319,7 +464,7 @@ class GridWorld(gym.Env):
         # Step costs (sum of active objectives)
         step_cost = 0.0
         if use_path:
-            step_cost += 1.0
+            step_cost += 0.1
         if use_gold:
             step_cost += 0.01
         if use_hazard:

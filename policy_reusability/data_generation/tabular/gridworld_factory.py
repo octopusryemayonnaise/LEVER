@@ -111,7 +111,7 @@ def init_gridworld_rand(
     block_position_value = -1
     gold_position_value = +1
     agent_position_value = 7
-    block_reward = -1
+    block_reward = -0.1
     target_reward = +100
     hazard_penalty = 0.0
     step_penalty = 0.0

@@ -55,6 +55,12 @@ def find_latest_run_dir(base_dir: str, spec: str) -> str | None:
     return os.path.join(base_dir, sorted(candidates)[-1])
 
 
+def _format_regressor_path(path: str, spec: str | None) -> str:
+    if not spec or "{spec}" not in path:
+        return path
+    return path.format(spec=spec)
+
+
 def seed_dir_exists(states_root: str, setup: str, seed: str) -> bool:
     return os.path.isdir(os.path.join(states_root, setup, f"seed_{seed}"))
 
@@ -82,7 +88,7 @@ def group_candidates_for_subqueries(
         results = [r for r in results if r.get("score", 0) > similarity_threshold]
         scored = []
         for r in results:
-            emb = r.get("policy_embedding")
+            emb = retriever.get_policy_embedding(r)
             if emb is None:
                 continue
             if isinstance(emb, list):
@@ -230,10 +236,22 @@ def main():
         help="FAISS metadata path to use",
     )
     parser.add_argument(
-        "--regressor-model-path",
+        "--regressor-base-path",
         type=str,
-        default="models/reward_regressor.pkl",
-        help="Regressor model path to use",
+        default="models/reward_regressor_base.pkl",
+        help="Regressor model path for trivial/base compositions",
+    )
+    parser.add_argument(
+        "--regressor-pair-path",
+        type=str,
+        default="models/reward_regressor_pair.pkl",
+        help="Regressor model path for double/pair compositions",
+    )
+    parser.add_argument(
+        "--regressor-trip-path",
+        type=str,
+        default="models/reward_regressor_trip.pkl",
+        help="Regressor model path for triple compositions",
     )
     parser.add_argument(
         "--similarity-threshold",
@@ -243,41 +261,94 @@ def main():
     )
     args = parser.parse_args()
 
-    retriever = PolicyRetriever(
-        index_path=args.index_path,
-        metadata_path=args.metadata_path,
-        regressor_model_path=args.regressor_model_path,
-        application_name="Grid World",
-        available_actions=GRIDWORLD_AVAILABLE_ACTIONS,
-    )
+    def build_retrievers(spec: str):
+        return {
+            "base": PolicyRetriever(
+                index_path=args.index_path,
+                metadata_path=args.metadata_path,
+                regressor_model_path=_format_regressor_path(
+                    args.regressor_base_path, spec
+                ),
+                regressor_variant="base",
+                application_name="Grid World",
+                available_actions=GRIDWORLD_AVAILABLE_ACTIONS,
+            ),
+            "pair": PolicyRetriever(
+                index_path=args.index_path,
+                metadata_path=args.metadata_path,
+                regressor_model_path=_format_regressor_path(
+                    args.regressor_pair_path, spec
+                ),
+                regressor_variant="pair",
+                application_name="Grid World",
+                available_actions=GRIDWORLD_AVAILABLE_ACTIONS,
+            ),
+            "trip": PolicyRetriever(
+                index_path=args.index_path,
+                metadata_path=args.metadata_path,
+                regressor_model_path=_format_regressor_path(
+                    args.regressor_trip_path, spec
+                ),
+                regressor_variant="trip",
+                application_name="Grid World",
+                available_actions=GRIDWORLD_AVAILABLE_ACTIONS,
+            ),
+        }
 
     # Resolve run directories and canonical states per spec.
     run_dirs = {}
+    retrievers_by_spec = {}
     canonical_by_spec = {}
     grid_by_spec = {}
+    base_rewards = ["path", "gold", "hazard", "lever"]
+    pair_rewards = base_rewards + ["path-gold", "hazard-lever"]
+    trip_rewards = base_rewards + ["path-gold-hazard"]
+
     for spec in args.specs:
         run_dir = find_latest_run_dir(args.state_runs_dir, spec)
         if not run_dir:
             print(f"Warning: no run_dir found for {spec} in {args.state_runs_dir}")
             continue
         run_dirs[spec] = run_dir
+        retrievers_by_spec[spec] = build_retrievers(spec)
         grid_size, canonical_count = infer_grid_and_canonical(run_dir)
-        canonical_by_spec[spec] = load_canonical_states(
-            states_folder=run_dir,
-            canonical_states=canonical_count,
-            run_dir=run_dir,
-        )
+        canonical_by_spec[spec] = {
+            "base": load_canonical_states(
+                states_folder=run_dir,
+                canonical_states=canonical_count,
+                run_dir=run_dir,
+                reward_systems=base_rewards,
+                output_suffix="base",
+            ),
+            "pair": load_canonical_states(
+                states_folder=run_dir,
+                canonical_states=canonical_count,
+                run_dir=run_dir,
+                reward_systems=pair_rewards,
+                output_suffix="pair",
+            ),
+            "trip": load_canonical_states(
+                states_folder=run_dir,
+                canonical_states=canonical_count,
+                run_dir=run_dir,
+                reward_systems=trip_rewards,
+                output_suffix="trip",
+            ),
+        }
         grid_by_spec[spec] = grid_size
 
     if not run_dirs:
         raise SystemExit("No valid spec run directories found.")
+
+    first_spec = next(iter(run_dirs))
+    base_retriever = retrievers_by_spec[first_spec]["base"]
 
     seeds = args.seeds
     if seeds is None:
         seeds = sorted(
             {
                 str(m.get("policy_seed"))
-                for m in retriever.vdb.metadata
+                for m in base_retriever.vdb.metadata
                 if m.get("policy_seed") is not None
             }
         )
@@ -286,6 +357,8 @@ def main():
     decomp_cache = {}
     exp_subqueries = {}
     for mode, experiments, policy_list in experiment_groups:
+        variant = "base" if mode == "trivial" else "pair" if mode == "double" else "trip"
+        retriever = retrievers_by_spec[first_spec][variant]
         for exp in experiments:
             setup = exp["setup"]
             query = exp["query"]
@@ -314,6 +387,8 @@ def main():
         canonical_states = canonical_by_spec[spec]
         grid_size = grid_by_spec[spec]
         for mode, experiments, _ in experiment_groups:
+            variant = "base" if mode == "trivial" else "pair" if mode == "double" else "trip"
+            retriever = retrievers_by_spec[spec][variant]
             for exp in experiments:
                 setup = exp["setup"]
                 sub_queries, decomp_time = exp_subqueries[(mode, setup)]
@@ -344,8 +419,9 @@ def main():
                         "groups": grouped,
                         "search_time": search_time,
                         "env": env,
-                        "canonical_states": canonical_states,
+                        "canonical_states": canonical_states[variant],
                         "decomp_time": decomp_time,
+                        "retriever": retriever,
                     }
 
     if not run_cache:
@@ -376,7 +452,7 @@ def main():
             if any(len(g) < k for g in groups):
                 continue
             q_best, combo_time = best_hybrid_from_groups(
-                retriever,
+                cache["retriever"],
                 groups,
                 k,
                 cache["canonical_states"],

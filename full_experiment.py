@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import time
+from contextlib import redirect_stdout
 
 import numpy as np
 import pandas as pd
@@ -117,7 +118,7 @@ def build_env_from_grid(
         hazard_position_value=-2,
         lever_position_value=2,
         agent_position_value=7,
-        block_reward=-1,
+        block_reward=-0.1,
         target_reward=100,
         gold_k=0,
         n=0,
@@ -162,7 +163,7 @@ def greedy_eval(
 ) -> float:
     env.reset().flatten()
     if max_steps is None:
-        max_steps = env.grid_length * env.grid_width
+        max_steps = 4 * env.grid_length * env.grid_width
     total_reward = 0.0
     state_index = env.state_to_index(env.agent_position)
     for _ in range(max_steps):
@@ -178,22 +179,22 @@ def greedy_eval(
 def generate_transitions(
     env: GridWorld, q_table: np.ndarray, max_steps: int | None = None
 ):
-    """Greedy rollout transitions (state_vec, next_state_vec) for successor training."""
+    """Greedy rollout transitions (state_vec, next_state_vec) matching generate_states_batch."""
     env.reset().flatten()
     if max_steps is None:
-        max_steps = env.grid_length * env.grid_width
-    transitions = []
-    state_vec = state_to_vector(env.grid.copy())
+        max_steps = 4 * env.grid_length * env.grid_width
+    episode_states = [np.copy(env.grid)]
     state_index = env.state_to_index(env.agent_position)
     for _ in range(max_steps):
         action = int(np.argmax(q_table[state_index, :]))
-        _, reward, done, _ = env.step(action)
-        next_vec = state_to_vector(env.grid.copy())
-        transitions.append((state_vec, next_vec))
-        state_vec = next_vec
+        grid, _, done, _ = env.step(action)
+        episode_states.append(np.copy(grid))
         state_index = env.state_to_index(env.agent_position)
         if done:
             break
+    transitions = []
+    for prev_state, next_state in zip(episode_states, episode_states[1:]):
+        transitions.append((state_to_vector(prev_state), state_to_vector(next_state)))
     return transitions
 
 
@@ -249,11 +250,12 @@ def fetch_candidates(
     retriever: PolicyRetriever,
     sub_queries,
     seed: str | None,
+    spec: str | None,
     similarity_threshold=0.7,
 ):
     """Search policies without retry (decomposition is retried instead)."""
     candidates, search_time = decomposed_candidates(
-        retriever, sub_queries, seed, similarity_threshold
+        retriever, sub_queries, seed, spec, similarity_threshold
     )
     return candidates, search_time
 
@@ -333,19 +335,20 @@ def decomposed_candidates(
     retriever: PolicyRetriever,
     sub_queries,
     seed: str | None,
+    spec: str | None,
     similarity_threshold=0.7,
 ):
     start = time.time()
     candidates = []
     for sq in sub_queries:
         result_dict, timing = retriever.vdb.search_similar_policies(
-            sq, policy_seed=seed
+            sq, policy_seed=seed, policy_spec=spec
         )
         results = result_dict.get("results", [])
         # Apply similarity filter
         results = [r for r in results if r.get("score", 0) > similarity_threshold]
         for r in results:
-            emb = r.get("policy_embedding")
+            emb = retriever.get_policy_embedding(r)
             if emb is None:
                 continue
             if isinstance(emb, list):
@@ -363,37 +366,77 @@ def decomposed_candidates(
 
 
 def targeted_composition(
-    retriever: PolicyRetriever, seed: str | None, sub_queries, canonical_states
+    retriever: PolicyRetriever, seed: str | None, spec: str | None, sub_queries, canonical_states
 ):
-    """Score candidates from provided sub-queries, take best two overall (sim>0.7 + regressor) and compose."""
+    """Score candidates per sub-query, take best per sub-query (sim>0.7 + regressor) and compose."""
     start = time.time()
-    candidates, candidate_time = fetch_candidates(retriever, sub_queries, seed)
+    grouped_candidates = []
+    search_time = 0.0
+    for sq in sub_queries:
+        result_dict, timing = retriever.vdb.search_similar_policies(
+            sq, policy_seed=seed, policy_spec=spec
+        )
+        if isinstance(timing, dict):
+            search_time += timing.get("total_time", 0.0)
+        else:
+            search_time += timing
+        results = result_dict.get("results", [])
+        results = [r for r in results if r.get("score", 0) > 0.7]
+        for r in results:
+            emb = retriever.get_policy_embedding(r)
+            if emb is None:
+                continue
+            if isinstance(emb, list):
+                emb = np.array(emb)
+            if retriever.regressor_model:
+                expected = getattr(retriever.regressor_model, "n_features_in_", None)
+                if expected is not None and emb.shape[0] != expected:
+                    continue
+                pred = float(retriever.regressor_model.predict(emb.reshape(1, -1))[0])
+            else:
+                pred = 0.0
+            r["regressor_score"] = pred
+        results = sorted(
+            results, key=lambda x: x.get("regressor_score", -1), reverse=True
+        )
+        grouped_candidates.append(results)
+    candidate_counts = [len(cands) for cands in grouped_candidates]
     print(
-        f"[seed {seed}] targeted: candidates={len(candidates)}, search_time={candidate_time:.6f}s (decomp reused)"
+        f"[seed {seed}] targeted: sub_queries={len(sub_queries)}, candidates={candidate_counts}, "
+        f"search_time={search_time:.6f}s (decomp reused)"
     )
-    candidates = sorted(
-        candidates, key=lambda x: x.get("regressor_score", -1), reverse=True
-    )
-    if len(candidates) < 2:
+    if any(count == 0 for count in candidate_counts):
         print(
-            f"[seed {seed}] targeted: insufficient candidates ({len(candidates)} < 2). "
+            f"[seed {seed}] targeted: insufficient candidates for one or more sub-queries. "
             f"May need lower similarity threshold or more policies in database."
         )
         return None, None, None, time.time() - start
-    p1, p2 = candidates[0], candidates[1]
-    q1 = load_q_table_from_metadata(p1)
-    q2 = load_q_table_from_metadata(p2)
-    if q1 is None or q2 is None:
-        missing = []
-        if q1 is None:
-            missing.append(f"p1={p1.get('policy_name', 'unknown')}")
-        if q2 is None:
-            missing.append(f"p2={p2.get('policy_name', 'unknown')}")
-        print(f"[seed {seed}] targeted: missing Q-tables for {', '.join(missing)}")
-        return None, None, None, time.time() - start
-    q_combined = combine_q_tables(q1, q2)
+
+    selected = []
+    q_tables = []
+    dags = []
+    for results in grouped_candidates:
+        chosen = None
+        chosen_q = None
+        for candidate in results:
+            q = load_q_table_from_metadata(candidate)
+            if q is None:
+                continue
+            chosen = candidate
+            chosen_q = q
+            break
+        if chosen is None or chosen_q is None:
+            print(
+                f"[seed {seed}] targeted: missing Q-tables for one or more sub-queries."
+            )
+            return None, None, None, time.time() - start
+        selected.append(chosen)
+        q_tables.append(chosen_q)
+        dags.append(chosen.get("dag"))
+
+    q_combined = combine_q_tables_list(q_tables)
     elapsed = time.time() - start
-    return q_combined, (p1, p2), (p1.get("dag"), p2.get("dag")), elapsed
+    return q_combined, tuple(selected), tuple(dags), elapsed
 
 
 def compose_with_dag(
@@ -417,23 +460,26 @@ def embedding_from_qtable(
     transitions = generate_transitions(env, q_table)
     # policy_name must include seed as the second-to-last underscore component.
     policy_name = f"combined_{seed_val:04d}_tmp"
-    _, embedding = train_and_save_successor_model(
-        policy_name, transitions, canonical_states, epochs=50, show_progress=True
-    )
+    with open(os.devnull, "w") as devnull, redirect_stdout(devnull):
+        _, embedding = train_and_save_successor_model(
+            policy_name, transitions, canonical_states, epochs=50, show_progress=False
+        )
     return embedding
 
 
 def embedding_from_transitions(transitions, canonical_states, seed_val: int):
     policy_name = f"combined_{seed_val:04d}_tmp"
-    _, embedding = train_and_save_successor_model(
-        policy_name, transitions, canonical_states, epochs=50, show_progress=True
-    )
+    with open(os.devnull, "w") as devnull, redirect_stdout(devnull):
+        _, embedding = train_and_save_successor_model(
+            policy_name, transitions, canonical_states, epochs=50, show_progress=False
+        )
     return embedding
 
 
 def exhaustive_composition(
     retriever: PolicyRetriever,
     seed: str | None,
+    spec: str | None,
     sub_queries,
     canonical_states,
     env: GridWorld,
@@ -445,7 +491,7 @@ def exhaustive_composition(
     search_time = 0.0
     for sq in sub_queries:
         result_dict, timing = retriever.vdb.search_similar_policies(
-            sq, policy_seed=seed
+            sq, policy_seed=seed, policy_spec=spec
         )
         if isinstance(timing, dict):
             search_time += timing.get("total_time", 0.0)
@@ -555,6 +601,7 @@ def exhaustive_composition(
 def hybrid_composition(
     retriever: PolicyRetriever,
     seed: str | None,
+    spec: str | None,
     sub_queries,
     canonical_states,
     env: GridWorld,
@@ -568,7 +615,7 @@ def hybrid_composition(
 
     for sq in sub_queries:
         result_dict, timing = retriever.vdb.search_similar_policies(
-            sq, policy_seed=seed
+            sq, policy_seed=seed, policy_spec=spec
         )
         if isinstance(timing, dict):
             search_time += timing.get("total_time", 0.0)
@@ -577,7 +624,7 @@ def hybrid_composition(
         results = result_dict.get("results", [])
         results = [r for r in results if r.get("score", 0) > similarity_threshold]
         for r in results:
-            emb = r.get("policy_embedding")
+            emb = retriever.get_policy_embedding(r)
             if emb is None:
                 continue
             if isinstance(emb, list):
@@ -690,6 +737,8 @@ def load_canonical_states(
     states_folder: str = "states_16",
     canonical_states: int = 64,
     run_dir: str | None = None,
+    reward_systems: list[str] | None = None,
+    output_suffix: str | None = None,
 ):
     """
     Load canonical states, creating them if they don't exist.
@@ -704,6 +753,8 @@ def load_canonical_states(
             states_folder=states_folder,
             canonical_states=canonical_states,
             run_dir=run_dir,
+            reward_systems=reward_systems,
+            output_suffix=output_suffix,
         )
     )
     return canonical_states_array
@@ -793,12 +844,17 @@ def run_full_experiment(
     generate_plots: bool = True,
     index_path: str = "faiss_index/policy.index",
     metadata_path: str = "faiss_index/metadata.pkl",
+    regressor_model_path: str = "models/reward_regressor_base.pkl",
+    regressor_variant: str = "base",
+    canonical_suffix: str | None = None,
     composition_method: str = "qsum",
     legacy_gold_exit_penalty: bool = False,
 ):
     retriever = PolicyRetriever(
         index_path=index_path,
         metadata_path=metadata_path,
+        regressor_model_path=regressor_model_path,
+        regressor_variant=regressor_variant,
         application_name="Grid World",
         available_actions=GRIDWORLD_AVAILABLE_ACTIONS,
     )
@@ -814,6 +870,18 @@ def run_full_experiment(
         base_name = os.path.basename(os.path.normpath(states_root))
         spec_label = base_name.split("_")[0] if base_name else "unknown"
 
+    if canonical_suffix is None:
+        canonical_suffix = regressor_variant
+    base_rewards = ["path", "gold", "hazard", "lever"]
+    pair_rewards = base_rewards + ["path-gold", "hazard-lever"]
+    trip_rewards = base_rewards + ["path-gold-hazard"]
+    if canonical_suffix == "pair":
+        canonical_rewards = pair_rewards
+    elif canonical_suffix == "trip":
+        canonical_rewards = trip_rewards
+    else:
+        canonical_rewards = base_rewards
+
     grid_size, canonical_states_count = infer_grid_and_canonical(states_root)
     run_dir = (
         states_root
@@ -824,6 +892,8 @@ def run_full_experiment(
         states_folder=states_root_name,
         canonical_states=canonical_states_count,
         run_dir=run_dir,
+        reward_systems=canonical_rewards,
+        output_suffix=canonical_suffix,
     )
 
     rows = []
@@ -832,9 +902,17 @@ def run_full_experiment(
     if setups is not None:
         experiments = [e for e in experiments if e["setup"] in setups]
     plot_setups = setups or sorted({e["setup"] for e in experiments})
-    seeds = seed_list or sorted(
-        {m.get("policy_seed") for m in retriever.vdb.metadata if m.get("policy_seed")}
-    )
+    if seed_list:
+        seeds = seed_list
+    else:
+        seeds = sorted(
+            {
+                m.get("policy_seed")
+                for m in retriever.vdb.metadata
+                if m.get("policy_seed")
+                and (spec_label is None or str(m.get("spec")) == str(spec_label))
+            }
+        )
 
     for exp in experiments:
         setup = exp["setup"]
@@ -901,7 +979,7 @@ def run_full_experiment(
                 f"[seed {seed_name}] Starting targeted composition (shared decomposition + sim>0.7 + regressor rank)"
             )
             q_tgt, pair_tgt, dags_tgt, t_targeted = targeted_composition(
-                retriever, seed_name, sub_queries, canonical_states
+                retriever, seed_name, spec_label, sub_queries, canonical_states
             )
             targeted_reward = None
             if composition_method == "exnonzero":
@@ -935,6 +1013,7 @@ def run_full_experiment(
             best_exh, t_exhaustive = exhaustive_composition(
                 retriever,
                 seed_name,
+                spec_label,
                 sub_queries,
                 canonical_states,
                 env=env,
@@ -964,6 +1043,7 @@ def run_full_experiment(
             best_hyb, t_hybrid = hybrid_composition(
                 retriever,
                 seed_name,
+                spec_label,
                 sub_queries,
                 canonical_states,
                 env=env,
@@ -1058,6 +1138,12 @@ def _find_latest_run_dir(base_dir: str, spec: str) -> str | None:
     return os.path.join(base_dir, sorted(candidates)[-1])
 
 
+def _format_regressor_path(path: str, spec: str | None) -> str:
+    if not spec or "{spec}" not in path:
+        return path
+    return path.format(spec=spec)
+
+
 def run_all_specs(
     state_runs_dir: str = "state_runs",
     specs: tuple[str, ...] = ("X1", "X5", "X10"),
@@ -1068,6 +1154,9 @@ def run_all_specs(
     generate_plots: bool = True,
     index_path: str = "faiss_index/policy.index",
     metadata_path: str = "faiss_index/metadata.pkl",
+    regressor_base_path: str = "models/reward_regressor_base.pkl",
+    regressor_pair_path: str = "models/reward_regressor_pair.pkl",
+    regressor_trip_path: str = "models/reward_regressor_trip.pkl",
     composition_method: str = "qsum",
     legacy_gold_exit_penalty: bool = False,
 ):
@@ -1077,6 +1166,9 @@ def run_all_specs(
         if not run_dir:
             print(f"Warning: no run_dir found for {spec} in {state_runs_dir}")
             continue
+        spec_base_path = _format_regressor_path(regressor_base_path, spec)
+        spec_pair_path = _format_regressor_path(regressor_pair_path, spec)
+        spec_trip_path = _format_regressor_path(regressor_trip_path, spec)
         spec_dir = os.path.join(results_dir, spec)
         os.makedirs(spec_dir, exist_ok=True)
 
@@ -1092,6 +1184,8 @@ def run_all_specs(
             generate_plots=generate_plots,
             index_path=index_path,
             metadata_path=metadata_path,
+            regressor_model_path=spec_base_path,
+            regressor_variant="base",
             composition_method=composition_method,
             legacy_gold_exit_penalty=legacy_gold_exit_penalty,
         )
@@ -1108,6 +1202,8 @@ def run_all_specs(
             generate_plots=generate_plots,
             index_path=index_path,
             metadata_path=metadata_path,
+            regressor_model_path=spec_pair_path,
+            regressor_variant="pair",
             composition_method=composition_method,
             legacy_gold_exit_penalty=legacy_gold_exit_penalty,
         )
@@ -1124,6 +1220,8 @@ def run_all_specs(
             generate_plots=generate_plots,
             index_path=index_path,
             metadata_path=metadata_path,
+            regressor_model_path=spec_trip_path,
+            regressor_variant="trip",
             composition_method=composition_method,
             legacy_gold_exit_penalty=legacy_gold_exit_penalty,
         )
@@ -1217,6 +1315,24 @@ def main():
         help="FAISS metadata path to use",
     )
     parser.add_argument(
+        "--regressor-base-path",
+        type=str,
+        default="models/reward_regressor_base.pkl",
+        help="Regressor model path for trivial/base compositions",
+    )
+    parser.add_argument(
+        "--regressor-pair-path",
+        type=str,
+        default="models/reward_regressor_pair.pkl",
+        help="Regressor model path for double/pair compositions",
+    )
+    parser.add_argument(
+        "--regressor-trip-path",
+        type=str,
+        default="models/reward_regressor_trip.pkl",
+        help="Regressor model path for triple compositions",
+    )
+    parser.add_argument(
         "--composition-method",
         choices=["qsum", "exnonzero"],
         default="qsum",
@@ -1244,6 +1360,15 @@ def main():
                 "expected_count": args.expected_subtasks,
             }
         ]
+        if args.expected_subtasks == 2:
+            regressor_path = _format_regressor_path(args.regressor_pair_path, args.spec)
+            regressor_variant = "pair"
+        elif args.expected_subtasks == 3:
+            regressor_path = _format_regressor_path(args.regressor_trip_path, args.spec)
+            regressor_variant = "trip"
+        else:
+            regressor_path = _format_regressor_path(args.regressor_base_path, args.spec)
+            regressor_variant = "base"
         run_full_experiment(
             args.output,
             args.seeds,
@@ -1256,6 +1381,8 @@ def main():
             generate_plots=not args.no_plots,
             index_path=args.index_path,
             metadata_path=args.metadata_path,
+            regressor_model_path=regressor_path,
+            regressor_variant=regressor_variant,
             composition_method=args.composition_method,
             legacy_gold_exit_penalty=args.legacy_gold_exit_penalty,
         )
@@ -1271,6 +1398,9 @@ def main():
             generate_plots=not args.no_plots,
             index_path=args.index_path,
             metadata_path=args.metadata_path,
+            regressor_base_path=args.regressor_base_path,
+            regressor_pair_path=args.regressor_pair_path,
+            regressor_trip_path=args.regressor_trip_path,
             composition_method=args.composition_method,
             legacy_gold_exit_penalty=args.legacy_gold_exit_penalty,
         )
@@ -1294,6 +1424,10 @@ def main():
             generate_plots=not args.no_plots,
             index_path=args.index_path,
             metadata_path=args.metadata_path,
+            regressor_model_path=_format_regressor_path(
+                args.regressor_base_path, args.spec
+            ),
+            regressor_variant="base",
             composition_method=args.composition_method,
             legacy_gold_exit_penalty=args.legacy_gold_exit_penalty,
         )
@@ -1316,6 +1450,10 @@ def main():
             generate_plots=not args.no_plots,
             index_path=args.index_path,
             metadata_path=args.metadata_path,
+            regressor_model_path=_format_regressor_path(
+                args.regressor_pair_path, args.spec
+            ),
+            regressor_variant="pair",
             composition_method=args.composition_method,
             legacy_gold_exit_penalty=args.legacy_gold_exit_penalty,
         )
@@ -1338,6 +1476,10 @@ def main():
             generate_plots=not args.no_plots,
             index_path=args.index_path,
             metadata_path=args.metadata_path,
+            regressor_model_path=_format_regressor_path(
+                args.regressor_trip_path, args.spec
+            ),
+            regressor_variant="trip",
             composition_method=args.composition_method,
             legacy_gold_exit_penalty=args.legacy_gold_exit_penalty,
         )

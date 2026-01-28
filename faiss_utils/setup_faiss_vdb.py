@@ -205,7 +205,7 @@ class FaissVectorDB:
             self.metadata = data["metadata"]
             self.policy_id_map = data["policy_id_map"]
 
-    def search_similar_policies(self, query_text, k=5, policy_seed=None):
+    def search_similar_policies(self, query_text, k=5, policy_seed=None, policy_spec=None):
         """
         Search for similar policies using semantic search.
 
@@ -214,6 +214,7 @@ class FaissVectorDB:
             k: Number of results to return (None = all policies)
             policy_seed: Optional filter to only search among policies with this seed.
                         If None, searches all policies.
+            policy_spec: Optional filter to only search among policies with this spec.
 
         Returns:
             Tuple of (result_dict, timing_dict) where:
@@ -221,33 +222,41 @@ class FaissVectorDB:
                 - "results": List of dicts with policy info and similarity scores
                 - "message": Optional message (None if results found, error message if no policies for seed)
                 - "seed": The policy_seed that was searched (or None)
+                - "spec": The policy_spec that was searched (or None)
             - timing_dict: Dictionary with timing information
         """
         start_time = time.time()
 
-        # Filter metadata by policy_seed if specified
-        if policy_seed is not None:
-            # Convert policy_seed to string for consistent comparison
-            policy_seed_str = str(policy_seed)
-            # Get indices of policies matching the seed
+        # Filter metadata by policy_seed/spec if specified
+        if policy_seed is not None or policy_spec is not None:
+            policy_seed_str = str(policy_seed) if policy_seed is not None else None
+            policy_spec_str = str(policy_spec) if policy_spec is not None else None
             filtered_indices = [
                 i
                 for i, meta in enumerate(self.metadata)
-                if str(meta.get("policy_seed")) == policy_seed_str
+                if (
+                    policy_seed_str is None
+                    or str(meta.get("policy_seed")) == policy_seed_str
+                )
+                and (
+                    policy_spec_str is None
+                    or str(meta.get("spec")) == policy_spec_str
+                )
             ]
 
             if not filtered_indices:
-                # No policies found with this seed
                 timing = {
                     "embedding_time": 0.0,
                     "search_time": 0.0,
                     "total_time": time.time() - start_time,
                 }
-                # Return empty results with a message indicating no policies found
+                seed_msg = f" seed {policy_seed}" if policy_seed is not None else ""
+                spec_msg = f" spec {policy_spec}" if policy_spec is not None else ""
                 return {
                     "results": [],
-                    "message": f"No policies found for seed {policy_seed}. This MDP state doesn't have policies to be reused.",
+                    "message": f"No policies found for{seed_msg}{spec_msg}. This MDP state doesn't have policies to be reused.",
                     "seed": policy_seed,
+                    "spec": policy_spec,
                 }, timing
 
             # Create a temporary filtered index for searching

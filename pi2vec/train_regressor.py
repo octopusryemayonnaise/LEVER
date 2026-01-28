@@ -1,5 +1,5 @@
 """
-Train a linear regression model to predict reward from policy embeddings.
+Train a regression model to predict reward from policy embeddings.
 """
 
 import json
@@ -8,8 +8,11 @@ import os
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import KFold, RandomizedSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 
 def load_training_data(json_path: str = "data/regressor_training_data.json"):
@@ -50,18 +53,268 @@ def load_training_data(json_path: str = "data/regressor_training_data.json"):
     return X, y
 
 
-def train_regressor(X, y):
+def load_training_data_with_targets(
+    json_path: str = "data/regressor_training_data.json",
+    embedding_key: str = "policy_embedding",
+):
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(
+            f"Training data file not found: {json_path}\n"
+            "This means the successor models haven't been trained yet.\n"
+            "Please run 'python pi2vec/train_successor.py' first to generate the training data."
+        )
+
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    if embedding_key in data:
+        X = np.array(data[embedding_key])
+    elif "policy_embedding" in data:
+        X = np.array(data["policy_embedding"])
+    else:
+        raise ValueError(f"Training data missing '{embedding_key}' embeddings.")
+    y = np.array(data["reward"])
+    targets = data.get("policy_target")
+    if targets is None:
+        raise ValueError("Training data missing 'policy_target' labels.")
+    targets = list(targets)
+
+    if X.ndim > 2:
+        original_shape = X.shape
+        X = X.reshape(original_shape[0], -1)
+        print(f"Reshaped policy embeddings from {original_shape} to {X.shape}")
+
+    return X, y, targets
+
+
+def load_training_data_multi(
+    json_path: str,
+    embedding_keys: list[str],
+):
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(
+            f"Training data file not found: {json_path}\n"
+            "This means the successor models haven't been trained yet.\n"
+            "Please run 'python pi2vec/train_successor.py' first to generate the training data."
+        )
+
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    embeddings = {}
+    for key in embedding_keys:
+        if key in data:
+            X = np.array(data[key])
+        elif "policy_embedding" in data:
+            X = np.array(data["policy_embedding"])
+        else:
+            raise ValueError(f"Training data missing '{key}' embeddings.")
+        if X.ndim > 2:
+            original_shape = X.shape
+            X = X.reshape(original_shape[0], -1)
+            print(f"Reshaped policy embeddings from {original_shape} to {X.shape}")
+        embeddings[key] = X
+
+    y = np.array(data["reward"])
+    targets = data.get("policy_target")
+    if targets is None:
+        raise ValueError("Training data missing 'policy_target' labels.")
+    targets = list(targets)
+
+    return embeddings, y, targets
+
+
+def save_training_data(
+    json_path: str, embeddings, rewards, policy_targets: list[str] | None = None
+):
+    policy_embeddings = []
+    for embedding in embeddings:
+        if isinstance(embedding, list):
+            policy_embeddings.append(embedding)
+        else:
+            policy_embeddings.append(embedding.tolist())
+    data = {
+        "policy_embedding": policy_embeddings,
+        "reward": list(rewards),
+    }
+    if policy_targets is not None:
+        data["policy_target"] = list(policy_targets)
+    os.makedirs(os.path.dirname(json_path) or ".", exist_ok=True)
+    with open(json_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _nmae(y_true, y_pred) -> float:
+    mae = mean_absolute_error(y_true, y_pred)
+    denom = np.mean(np.abs(y_true))
+    return mae / denom if denom > 0 else np.inf
+
+
+def kfold_nmae(
+    X,
+    y,
+    k: int = 10,
+    normalize_embeddings: bool = False,
+    seed: int = 42,
+):
+    kf = KFold(n_splits=k, shuffle=True, random_state=seed)
+    scores = []
+    for fold_idx, (train_idx, val_idx) in enumerate(kf.split(X), start=1):
+        print(
+            f"  Fold {fold_idx}/{k}: train={len(train_idx)} val={len(val_idx)}"
+        )
+        model = train_regressor(
+            X[train_idx],
+            y[train_idx],
+            normalize_embeddings=normalize_embeddings,
+        )
+        y_pred = model.predict(X[val_idx])
+        score = _nmae(y[val_idx], y_pred)
+        print(f"  Fold {fold_idx}/{k}: NMAE = {score:.4f}")
+        scores.append(score)
+    avg = float(np.mean(scores)) if scores else float("nan")
+    print(f"  Avg NMAE (k={k}): {avg:.4f}")
+    return scores, avg
+
+
+def train_regressor_variants(
+    source_json_path: str,
+    output_json_paths: dict[str, str],
+    output_model_paths: dict[str, str],
+    output_plot_paths: dict[str, str] | None = None,
+    variants: dict[str, list[str]] | None = None,
+    embedding_key_by_variant: dict[str, str] | None = None,
+    normalize_embeddings: bool = False,
+    random_search: bool = False,
+    random_search_iters: int = 25,
+    random_search_cv: int = 10,
+    random_search_seed: int = 42,
+):
+    if variants is None:
+        variants = {
+            "base": ["gold", "path", "hazard", "lever"],
+            "pair": ["gold", "path", "hazard", "lever", "path-gold", "hazard-lever"],
+            "trip": ["gold", "path", "hazard", "lever", "path-gold-hazard"],
+        }
+    if embedding_key_by_variant is None:
+        embedding_key_by_variant = {
+            "base": "policy_embedding_base",
+            "pair": "policy_embedding_pair",
+            "trip": "policy_embedding_trip",
+        }
+
+    embedding_keys = list(set(embedding_key_by_variant.values()))
+    embeddings_by_key, y, targets = load_training_data_multi(
+        source_json_path, embedding_keys
+    )
+    if len(y) == 0:
+        raise ValueError("No training data found for regressor variants.")
+
+    for key, allowed_targets in variants.items():
+        embedding_key = embedding_key_by_variant.get(key, "policy_embedding")
+        X = embeddings_by_key[embedding_key]
+        mask = [t in allowed_targets for t in targets]
+        X_sub = X[mask]
+        y_sub = y[mask]
+        targets_sub = [t for t in targets if t in allowed_targets]
+        if len(X_sub) == 0:
+            raise ValueError(f"No samples found for regressor variant '{key}'.")
+
+        output_json = output_json_paths.get(key)
+        output_model = output_model_paths.get(key)
+        output_plot = output_plot_paths.get(key) if output_plot_paths else None
+        if output_json:
+            save_training_data(output_json, X_sub, y_sub, targets_sub)
+        print(f"[{key}] 10-fold CV NMAE (90/10 splits):")
+        kfold_nmae(
+            X_sub,
+            y_sub,
+            k=10,
+            normalize_embeddings=normalize_embeddings,
+        )
+        model = train_regressor(
+            X_sub,
+            y_sub,
+            normalize_embeddings=normalize_embeddings,
+            random_search=random_search,
+            random_search_iters=random_search_iters,
+            random_search_cv=random_search_cv,
+            random_search_seed=random_search_seed,
+        )
+        if output_model:
+            save_model(model, model_path=output_model)
+        if output_plot:
+            y_pred = model.predict(X_sub)
+            plot_regression_results(y_sub, y_pred, save_path=output_plot)
+
+
+def _make_hgbr_pipeline(normalize_embeddings: bool):
+    regressor = HistGradientBoostingRegressor(
+        max_iter=300,
+        learning_rate=0.05,
+        max_depth=3,
+        min_samples_leaf=10,
+        l2_regularization=1.0,
+        early_stopping=False,
+        random_state=42,
+    )
+    if normalize_embeddings:
+        return (
+            Pipeline(
+                [
+                    ("scaler", StandardScaler()),
+                    ("regressor", regressor),
+                ]
+            ),
+            "regressor__",
+        )
+    return regressor, ""
+
+
+def _hgbr_param_distributions(prefix: str = ""):
+    return {
+        f"{prefix}max_iter": [200, 300, 500, 800],
+        f"{prefix}learning_rate": [0.01, 0.03, 0.05, 0.1],
+        f"{prefix}max_depth": [2, 3, 4, 5],
+        f"{prefix}min_samples_leaf": [5, 10, 20],
+        f"{prefix}l2_regularization": [0.0, 0.1, 1.0, 10.0],
+    }
+
+
+def train_regressor(
+    X,
+    y,
+    normalize_embeddings: bool = False,
+    random_search: bool = False,
+    random_search_iters: int = 25,
+    random_search_cv: int = 10,
+    random_search_seed: int = 42,
+):
     """
-    Train a linear regression model.
+    Train a regression model.
 
     Args:
         X: Policy embeddings (n_samples, n_features)
         y: Rewards (n_samples,)
 
     Returns:
-        Trained LinearRegression model
+        Trained regression model
     """
-    model = LinearRegression()
+    model, prefix = _make_hgbr_pipeline(normalize_embeddings)
+    if random_search:
+        param_dist = _hgbr_param_distributions(prefix)
+        search = RandomizedSearchCV(
+            model,
+            param_distributions=param_dist,
+            n_iter=random_search_iters,
+            cv=random_search_cv,
+            scoring="neg_mean_absolute_error",
+            random_state=random_search_seed,
+            n_jobs=-1,
+        )
+        search.fit(X, y)
+        print(f"✓ Random search best params: {search.best_params_}")
+        return search.best_estimator_
     model.fit(X, y)
     return model
 
@@ -126,7 +379,6 @@ def plot_regression_results(
     )
 
     # Calculate metrics
-    r2 = r2_score(y_true, y_pred)
     mae = mean_absolute_error(y_true, y_pred)
     # NMAE: Normalized Mean Absolute Error (MAE / mean of actual values)
     nmae = mae / np.mean(np.abs(y_true)) if np.mean(np.abs(y_true)) > 0 else np.inf
@@ -175,7 +427,7 @@ def plot_regression_results(
     ax.set_title("Performance Predictor: Policy Embedding → Reward", fontsize=12)
 
     # Add metrics text
-    metrics_text = f"R² = {r2:.3f}\nNMAE = {nmae:.3f}"
+    metrics_text = f"NMAE = {nmae:.3f}"
     ax.text(
         0.05,
         0.95,
@@ -227,8 +479,11 @@ def main(
 
     print(f"✓ Loaded {len(X)} samples with {X.shape[1]} features")
 
+    print("\n10-fold CV NMAE (90/10 splits):")
+    kfold_nmae(X, y, k=10, normalize_embeddings=False)
+
     # Train model
-    print("\nTraining linear regression model...")
+    print("\nTraining HistGradientBoostingRegressor model...")
     model = train_regressor(X, y)
     print("✓ Model trained")
 

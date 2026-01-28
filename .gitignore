@@ -1,2 +1,9 @@
 __pycache__/
 lever.egg-info/
+comparisons_*/
+deeprl_runs/
+data/
+models/
+psi_models/
+faiss_index_*/
+/state_runs_*/

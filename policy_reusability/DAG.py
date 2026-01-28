@@ -56,7 +56,7 @@ class DAG:
         key = (a, b)
         self.edge_counts[key] = self.edge_counts.get(key, 0) + 1
 
-    # This has been implemented for the gridworld environment with two actions: right and down
+    # This has been implemented for the gridworld environment with four actions.
 
     def obtain_action(self, state_1_index, state_2_index):
         key = (state_1_index, state_2_index)
@@ -66,20 +66,17 @@ class DAG:
         state_1 = self._state_cache[state_1_index]
         state_2 = self._state_cache[state_2_index]
 
-        # down
-        if state_2[0] == state_1[0] + 1 and state_2[1] == state_1[1]:
-            action = 1
         # right
-        elif state_2[0] == state_1[0] and state_2[1] == state_1[1] + 1:
+        if state_2[0] == state_1[0] and state_2[1] == state_1[1] + 1:
             action = 0
         # down
         elif state_2[0] == state_1[0] + 1 and state_2[1] == state_1[1]:
             action = 1
-        # right*2
-        elif state_2[0] == state_1[0] and state_2[1] == state_1[1] + 2:
+        # left
+        elif state_2[0] == state_1[0] and state_2[1] == state_1[1] - 1:
             action = 2
-        # down*2
-        elif state_2[0] == state_1[0] + 2 and state_2[1] == state_1[1]:
+        # up
+        elif state_2[0] == state_1[0] - 1 and state_2[1] == state_1[1]:
             action = 3
         else:
             action = None
@@ -88,7 +85,7 @@ class DAG:
         self._action_cache[key] = action
         return action
 
-    # This has been implemented for the gridworld environment with two actions: right and down
+    # This has been implemented for the gridworld environment with four actions.
     # def obtain_action(self, state_1_index, state_2_index):
 
     #     if (state_1_index == 0 and state_2_index == 2) or (state_1_index == 2 and state_2_index == 4) or (state_1_index == 3 and state_2_index == 5):
@@ -378,11 +375,13 @@ class DAG:
     def _reward_path_static(self, current_state, next_state):
         if next_state in self._block_positions:
             return self._block_reward
-        if next_state == self._target_position:
-            return self._target_reward
         d1 = sum(abs(a - b) for a, b in zip(current_state, self._target_position))
         d2 = sum(abs(a - b) for a, b in zip(next_state, self._target_position))
-        return d1 - d2
+        reward = d1 - d2
+        if next_state == self._target_position:
+            reward += self._target_reward
+        reward -= 0.1
+        return reward
 
     def _reward_gold_static(self, next_state):
         if next_state in self._block_positions:
@@ -422,9 +421,72 @@ class DAG:
             if tuple(next_state) == self._lever_position:
                 reward_total += 20
 
+        # Lever shaping (approximate: always toward lever when present).
+        if use_lever:
+            if self._lever_position is not None:
+                prev_dist = abs(current_state[0] - self._lever_position[0]) + abs(
+                    current_state[1] - self._lever_position[1]
+                )
+                curr_dist = abs(next_state[0] - self._lever_position[0]) + abs(
+                    next_state[1] - self._lever_position[1]
+                )
+                reward_total += prev_dist - curr_dist
+            elif not use_path:
+                prev_dist = sum(
+                    abs(a - b) for a, b in zip(current_state, self._target_position)
+                )
+                curr_dist = sum(
+                    abs(a - b) for a, b in zip(next_state, self._target_position)
+                )
+                reward_total += prev_dist - curr_dist
+
+        # Gold shaping (approximate: nearest gold, no per-gold state tracking).
+        if use_gold:
+            if self._gold_positions:
+                prev_dist = min(
+                    abs(current_state[0] - gx) + abs(current_state[1] - gy)
+                    for gx, gy in self._gold_positions
+                )
+                curr_dist = min(
+                    abs(next_state[0] - gx) + abs(next_state[1] - gy)
+                    for gx, gy in self._gold_positions
+                )
+                reward_total += prev_dist - curr_dist
+            elif not use_path and (not use_lever or self._lever_position is None):
+                prev_dist = sum(
+                    abs(a - b) for a, b in zip(current_state, self._target_position)
+                )
+                curr_dist = sum(
+                    abs(a - b) for a, b in zip(next_state, self._target_position)
+                )
+                reward_total += prev_dist - curr_dist
+
         # Gold reward (approximate: immediate for cell)
         if use_gold and tuple(next_state) in self._gold_positions:
             reward_total += 5
+
+        # Path shaping toward exit.
+        if use_path:
+            prev_dist = sum(
+                abs(a - b) for a, b in zip(current_state, self._target_position)
+            )
+            curr_dist = sum(
+                abs(a - b) for a, b in zip(next_state, self._target_position)
+            )
+            reward_total += prev_dist - curr_dist
+
+        # Hazard shaping toward exit when not path/goal-driven.
+        if use_hazard and not use_path:
+            if (not use_gold or not self._gold_positions) and (
+                not use_lever or self._lever_position is None
+            ):
+                prev_dist = sum(
+                    abs(a - b) for a, b in zip(current_state, self._target_position)
+                )
+                curr_dist = sum(
+                    abs(a - b) for a, b in zip(next_state, self._target_position)
+                )
+                reward_total += prev_dist - curr_dist
 
         # Hazard proximity penalty (4-neighborhood)
         if use_hazard and self._hazard_positions:
@@ -455,7 +517,7 @@ class DAG:
 
         # Step costs (sum of active objectives)
         if use_path:
-            reward_total -= 1.0
+            reward_total -= 0.1
         if use_gold:
             reward_total -= 0.01
         if use_hazard:
@@ -485,6 +547,7 @@ class DAG:
 
         next_state = self._state_cache[next_state_index]
         next_state_t = tuple(next_state)
+        current_state = self._state_cache[state_index]
 
         if next_state_t in self._block_positions:
             return self._block_reward, remaining_gold, lever_collected, False
@@ -500,9 +563,74 @@ class DAG:
                 reward_total += 20
                 new_lever = True
 
+        # Lever shaping toward lever until collected, then toward exit if needed.
+        if use_lever:
+            if self._lever_position is not None and not lever_collected:
+                prev_dist = abs(current_state[0] - self._lever_position[0]) + abs(
+                    current_state[1] - self._lever_position[1]
+                )
+                curr_dist = abs(next_state[0] - self._lever_position[0]) + abs(
+                    next_state[1] - self._lever_position[1]
+                )
+                reward_total += prev_dist - curr_dist
+            elif not use_path:
+                prev_dist = sum(
+                    abs(a - b) for a, b in zip(current_state, self._target_position)
+                )
+                curr_dist = sum(
+                    abs(a - b) for a, b in zip(next_state, self._target_position)
+                )
+                reward_total += prev_dist - curr_dist
+
         if use_gold and next_state_t in self._gold_positions and remaining_gold > 0:
             reward_total += 5
             new_remaining = remaining_gold - 1
+
+        # Gold shaping (approximate: nearest gold, no per-gold state tracking).
+        if use_gold:
+            if remaining_gold > 0 and self._gold_positions:
+                prev_dist = min(
+                    abs(current_state[0] - gx) + abs(current_state[1] - gy)
+                    for gx, gy in self._gold_positions
+                )
+                curr_dist = min(
+                    abs(next_state[0] - gx) + abs(next_state[1] - gy)
+                    for gx, gy in self._gold_positions
+                )
+                reward_total += prev_dist - curr_dist
+            elif remaining_gold == 0 and not use_path and (
+                (not use_lever) or lever_collected or self._lever_position is None
+            ):
+                prev_dist = sum(
+                    abs(a - b) for a, b in zip(current_state, self._target_position)
+                )
+                curr_dist = sum(
+                    abs(a - b) for a, b in zip(next_state, self._target_position)
+                )
+                reward_total += prev_dist - curr_dist
+
+        # Path shaping toward exit.
+        if use_path:
+            prev_dist = sum(
+                abs(a - b) for a, b in zip(current_state, self._target_position)
+            )
+            curr_dist = sum(
+                abs(a - b) for a, b in zip(next_state, self._target_position)
+            )
+            reward_total += prev_dist - curr_dist
+
+        # Hazard shaping toward exit when not path/goal-driven.
+        if use_hazard and not use_path:
+            if (not use_gold or remaining_gold == 0) and (
+                (not use_lever) or lever_collected or self._lever_position is None
+            ):
+                prev_dist = sum(
+                    abs(a - b) for a, b in zip(current_state, self._target_position)
+                )
+                curr_dist = sum(
+                    abs(a - b) for a, b in zip(next_state, self._target_position)
+                )
+                reward_total += prev_dist - curr_dist
 
         if use_hazard and self._hazard_positions:
             x, y = next_state
@@ -533,7 +661,7 @@ class DAG:
                 reward_total += 80 if new_lever else 20
 
         if use_path:
-            reward_total -= 1.0
+            reward_total -= 0.1
         if use_gold:
             reward_total -= 0.01
         if use_hazard:

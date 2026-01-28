@@ -1,7 +1,9 @@
 import glob
+import json
 import os
 import pickle
 import random
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -252,6 +254,294 @@ def state_to_vector(state: np.ndarray, hazard_steps: float | None = None) -> np.
     return feature_vector
 
 
+@lru_cache(maxsize=1)
+def _load_vit_components():
+    from transformers import ViTImageProcessor, ViTModel
+
+    processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224")
+    model = ViTModel.from_pretrained("google/vit-base-patch16-224")
+    model.eval()
+    return processor, model
+
+
+def _render_env_image(env) -> np.ndarray:
+    frame = None
+    if hasattr(env, "unwrapped") and hasattr(env.unwrapped, "get_frame"):
+        try:
+            frame = env.unwrapped.get_frame(highlight=False)
+        except TypeError:
+            frame = env.unwrapped.get_frame()
+    if frame is None:
+        frame = env.render()
+    if frame is None:
+        raise ValueError("Env render returned None; ensure render_mode='rgb_array'.")
+    if frame.shape[0] > frame.shape[1]:
+        # Crop any top banner to keep the square grid area.
+        frame = frame[-frame.shape[1] :, :, :]
+    return frame
+
+
+def seed_to_image_array(
+    seed: int,
+    size: int = 16,
+    num_balls: int = 25,
+    num_walls: int = 15,
+    num_lava: int = 15,
+    reward_system: str = "path-gold-hazard-lever",
+    ball_reward: float = 0.1,
+    key_reward: float = 0.1,
+    exit_reward: float = 20.0,
+    exit_with_key_reward: float = 40.0,
+    lava_penalty: float = -1.0,
+    step_penalty: float = -0.001,
+    path_progress_scale: float = 0.5,
+) -> np.ndarray:
+    """Create a LeverGrid RGB image array for a specific environment seed."""
+    from policy_reusability.env.lever_minigrid import LeverGridEnv
+
+    env = LeverGridEnv(
+        size=size,
+        num_balls=num_balls,
+        num_walls=num_walls,
+        num_lava=num_lava,
+        reward_system=reward_system,
+        ball_reward=ball_reward,
+        key_reward=key_reward,
+        exit_reward=exit_reward,
+        exit_with_key_reward=exit_with_key_reward,
+        lava_penalty=lava_penalty,
+        step_penalty=step_penalty,
+        path_progress_scale=path_progress_scale,
+        render_mode="rgb_array",
+    )
+    try:
+        env.reset(seed=int(seed))
+        return _render_env_image(env)
+    finally:
+        env.close()
+
+
+def state_to_vector_deep(image: np.ndarray, device: str | None = None) -> np.ndarray:
+    """Encode an RGB image array into a ViT feature vector (CLS embedding)."""
+    from PIL import Image
+    import torch
+
+    processor, model = _load_vit_components()
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_device = next(model.parameters()).device
+    if model_device.type != device:
+        model = model.to(device)
+
+    if isinstance(image, Image.Image):
+        pil_image = image
+    else:
+        pil_image = Image.fromarray(image)
+
+    inputs = processor(images=pil_image, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model(**inputs)
+    if outputs.pooler_output is not None:
+        embedding = outputs.pooler_output
+    else:
+        embedding = outputs.last_hidden_state[:, 0]
+    return embedding.squeeze(0).detach().cpu().numpy()
+
+
+def _load_eval_seeds(seeds_path: str) -> list[int]:
+    with open(seeds_path, "r", encoding="utf-8") as handle:
+        seeds = json.load(handle)
+    return [int(seed) for seed in seeds]
+
+
+def _select_top_snapshots(rewards_path: str, top_k: int = 3) -> list[dict]:
+    df = pd.read_csv(rewards_path)
+    df["episode"] = pd.to_numeric(df.get("episode"), errors="coerce")
+    df["reward"] = pd.to_numeric(df.get("reward"), errors="coerce")
+    df = df.dropna(subset=["episode", "reward"])
+    if df.empty:
+        return []
+    df = df.sort_values(["reward", "episode"], ascending=[False, False])
+    return [
+        {"episode": int(row["episode"]), "reward": float(row["reward"])}
+        for _, row in df.head(top_k).iterrows()
+    ]
+
+
+def create_deeprl_transition_dataset(
+    deeprl_root: str = "deeprl_runs/16",
+    policies: list[str] | None = None,
+    eval_seeds_path: str = "deeprl_runs/16/eval_env_seeds.json",
+    output_path: str = "data_rl/deeprl_transitions.pkl",
+    canonical_states_path: str = "data_rl/deeprl_canonical_states.pkl",
+    canonical_count: int = 128,
+    size: int = 16,
+    num_balls: int = 25,
+    num_walls: int = 8,
+    num_lava: int = 8,
+    ball_reward: float = 0.1,
+    key_reward: float = 0.1,
+    exit_reward: float = 50.0,
+    exit_with_key_reward: float = 100.0,
+    lava_penalty: float = -1.0,
+    step_penalty: float = -0.001,
+    path_progress_scale: float = 1.0,
+    device: str | None = None,
+    deterministic: bool = True,
+    show_progress: bool = True,
+):
+    """
+    Build a dataset of (s, s') transitions for deep RL policies and save to a pickle file.
+
+    Transitions are loaded from per-snapshot eval files, not re-generated via env rollouts.
+    """
+    from minigrid.core.grid import Grid
+    from policy_reusability.env.lever_minigrid import LeverGridEnv
+    from tqdm import tqdm
+
+    if policies is None:
+        policies = [
+            "hazard",
+            "lever",
+            "path",
+            "gold",
+            "hazard-lever",
+            "path-gold",
+            "path-gold-hazard",
+        ]
+
+    _ = eval_seeds_path  # unused: transitions are read from snapshot files
+    label_by_rank = [100, 80, 60, 20]
+    dataset = []
+    canonical_states = []
+    seen_states = 0
+
+    def maybe_add_canonical(vec):
+        nonlocal seen_states
+        seen_states += 1
+        if len(canonical_states) < canonical_count:
+            canonical_states.append(vec)
+        else:
+            idx = random.randrange(seen_states)
+            if idx < canonical_count:
+                canonical_states[idx] = vec
+
+    def state_to_image(state, env):
+        grid_data = state.get("grid")
+        if grid_data is None:
+            return None
+        decoded = Grid.decode(grid_data)
+        if isinstance(decoded, tuple):
+            grid, _ = decoded
+        else:
+            grid = decoded
+        env.grid = grid
+        env.agent_pos = tuple(int(x) for x in state.get("agent_pos", (0, 0)))
+        env.agent_dir = int(state.get("agent_dir", 0))
+        env.carrying = None
+        return _render_env_image(env)
+
+    for policy in policies:
+        policy_dir = os.path.join(deeprl_root, policy)
+        rewards_path = os.path.join(policy_dir, "episode_rewards.csv")
+        if not os.path.exists(rewards_path):
+            print(f"Warning: missing {rewards_path}; skipping {policy}.")
+            continue
+
+        snapshots = _select_top_snapshots(rewards_path, top_k=4)
+        if not snapshots:
+            print(f"Warning: no rewards found in {rewards_path}; skipping {policy}.")
+            continue
+
+        for rank, snapshot in enumerate(snapshots):
+            label = (
+                label_by_rank[rank] if rank < len(label_by_rank) else label_by_rank[-1]
+            )
+            episode_id = snapshot["episode"]
+            reward = snapshot["reward"]
+            episode_dir = os.path.join(
+                policy_dir, "episodes", f"episode_{episode_id:06d}"
+            )
+            transitions_path = os.path.join(episode_dir, "eval_transitions.pkl")
+            if not os.path.exists(transitions_path):
+                print(f"Warning: missing {transitions_path}; skipping {policy}.")
+                continue
+
+            with open(transitions_path, "rb") as handle:
+                raw_transitions = pickle.load(handle)
+
+            if not raw_transitions:
+                print(f"Warning: empty transitions in {transitions_path}; skipping.")
+                continue
+
+            policy_label = f"{policy}_{label}"
+            print(f"Encoding transitions for {policy_label} (episode {episode_id})")
+
+            env = LeverGridEnv(
+                size=size,
+                num_balls=num_balls,
+                num_walls=num_walls,
+                num_lava=num_lava,
+                reward_system=policy,
+                ball_reward=ball_reward,
+                key_reward=key_reward,
+                exit_reward=exit_reward,
+                exit_with_key_reward=exit_with_key_reward,
+                lava_penalty=lava_penalty,
+                step_penalty=step_penalty,
+                path_progress_scale=path_progress_scale,
+                render_mode="rgb_array",
+            )
+            try:
+                transitions = []
+                iterator = raw_transitions
+                if show_progress:
+                    iterator = tqdm(
+                        raw_transitions,
+                        total=len(raw_transitions),
+                        desc=policy_label,
+                    )
+                for item in iterator:
+                    state = item.get("state", {})
+                    next_state = item.get("next_state", {})
+                    state_img = state_to_image(state, env)
+                    next_img = state_to_image(next_state, env)
+                    if state_img is None or next_img is None:
+                        continue
+                    prev_vec = state_to_vector_deep(state_img, device=device)
+                    next_vec = state_to_vector_deep(next_img, device=device)
+                    transitions.append((prev_vec, next_vec))
+                    maybe_add_canonical(prev_vec)
+                    maybe_add_canonical(next_vec)
+            finally:
+                env.close()
+
+            dataset.append(
+                {
+                    "model_name": policy_label,
+                    "policy_target": policy,
+                    "reward": reward,
+                    "transitions": transitions,
+                    "episode_id": episode_id,
+                }
+            )
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "wb") as handle:
+        pickle.dump(dataset, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"Saved deep RL transitions to {output_path}")
+    if canonical_states:
+        os.makedirs(os.path.dirname(canonical_states_path), exist_ok=True)
+        canonical_array = np.array(canonical_states, dtype=np.float32)
+        with open(canonical_states_path, "wb") as handle:
+            pickle.dump(canonical_array, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Saved deep RL canonical states to {canonical_states_path}")
+    else:
+        print("Warning: no canonical states sampled; transitions were empty.")
+    return dataset
+
+
 def get_episode_path(
     base_dir, policy, seed, episode_id, states_folder: str | None = "states_16"
 ):
@@ -286,6 +576,7 @@ def create_canonical_states(
     run_dir: str | None = None,
     reward_systems: list[str] | None = None,
     force_recreate: bool = False,
+    output_suffix: str | None = None,
 ):
     """
     Randomly select states from available reward systems, convert them to feature
@@ -303,16 +594,17 @@ def create_canonical_states(
         numpy array of shape (canonical_states, STATE_HEAD_LEN + GMAX) containing the canonical
         state feature vectors, or None if file already exists
     """
+    suffix = f"_{output_suffix}" if output_suffix else ""
     if run_dir:
         base_dir = run_dir
         run_name = os.path.basename(os.path.normpath(run_dir))
         output_path = os.path.join(
-            os.getcwd(), "data", f"canonical_states_{run_name}.npy"
+            os.getcwd(), "data", f"canonical_states_{run_name}{suffix}.npy"
         )
     else:
         base_dir = os.getcwd()
         output_path = os.path.join(
-            base_dir, "data", f"canonical_states_{states_folder}.npy"
+            base_dir, "data", f"canonical_states_{states_folder}{suffix}.npy"
         )
 
     # Check if file already exists
@@ -435,11 +727,13 @@ def process_states(
     base_dir = os.getcwd()
     if run_dir:
         run_name = os.path.basename(os.path.normpath(run_dir))
+        spec_prefix = run_name.split("_")[0] if run_name else None
         output_path = os.path.join(base_dir, "data", f"processed_states_{run_name}.csv")
         transitions_path = os.path.join(
             base_dir, "data", f"processed_states_transitions_{run_name}.pkl"
         )
     else:
+        spec_prefix = None
         output_path = os.path.join(base_dir, "data", "processed_states.csv")
         transitions_path = os.path.join(
             base_dir, "data", "processed_states_transitions.pkl"
@@ -456,6 +750,8 @@ def process_states(
             df = pd.read_csv(output_path)
             if df.empty or len(df.columns) == 0:
                 raise pd.errors.EmptyDataError("empty processed_states.csv")
+            if spec_prefix and "spec" not in df.columns:
+                df["spec"] = spec_prefix
             # Load transitions from pickle file
             with open(transitions_path, "rb") as f:
                 transitions_list = pickle.load(f)
@@ -488,7 +784,7 @@ def process_states(
         else:
             reward_systems = ["gold", "path"]
     if percentages is None:
-        percentages = [0.2, 0.6, 0.8]
+        percentages = [0.2, 0.6, 1.0]
 
     results = []
 
@@ -518,12 +814,6 @@ def process_states(
     print(f"Using {len(selected_seed_names)} common seeds")
     print(f"Selected seeds: {selected_seed_names}")
 
-    spec_prefix = None
-    if run_dir:
-        run_name = os.path.basename(os.path.normpath(run_dir))
-        if run_name:
-            spec_prefix = run_name.split("_")[0]
-
     # Now process both policies using the same selected seeds
     for policy in reward_systems:
         print(f"\nProcessing policy: {policy}")
@@ -545,20 +835,95 @@ def process_states(
                 print(f"Error reading {rewards_file}: {e}")
                 continue
 
-            total_episodes = len(df_rewards)
-            if total_episodes == 0:
+            df_rewards["episode"] = pd.to_numeric(
+                df_rewards.get("episode"), errors="coerce"
+            )
+            df_rewards["reward"] = pd.to_numeric(
+                df_rewards.get("reward"), errors="coerce"
+            )
+            df_rewards = df_rewards.dropna(subset=["episode", "reward"])
+            if df_rewards.empty:
                 continue
 
-            for p in percentages:
-                # Calculate index
-                # 100% -> last index (N-1)
-                # 20% -> 0.2 * (N-1)
-                idx = int(p * (total_episodes - 1))
+            episode_glob = os.path.join(
+                seed_dir, "episodes", "episode_*", "episode_states.npy"
+            )
+            available_episode_ids = set()
+            for path in glob.glob(episode_glob):
+                episode_dir = os.path.basename(os.path.dirname(path))
+                if not episode_dir.startswith("episode_"):
+                    continue
+                try:
+                    available_episode_ids.add(int(episode_dir.split("_")[1]))
+                except (IndexError, ValueError):
+                    continue
+            if available_episode_ids:
+                df_rewards = df_rewards[
+                    df_rewards["episode"].isin(available_episode_ids)
+                ]
+                if df_rewards.empty:
+                    print(
+                        f"Warning: no episode snapshots found for {seed_dir}. Skipping."
+                    )
+                    continue
 
-                if idx >= total_episodes:
-                    idx = total_episodes - 1
+            reward_values = sorted(df_rewards["reward"].unique().tolist())
+            min_reward = reward_values[0]
+            mid_reward = reward_values[len(reward_values) // 2]
+            max_reward = reward_values[-1]
 
-                row = df_rewards.iloc[idx]
+            sample_labels = [int(p * 100) for p in percentages]
+            if len(sample_labels) != 3:
+                sample_labels = [20, 60, 100]
+            label_by_key = {
+                "min": sample_labels[0],
+                "mid": sample_labels[1],
+                "max": sample_labels[2],
+            }
+
+            selection_plan = [
+                ("max", max_reward, True),  # best snapshot (max reward, latest episode)
+                ("min", min_reward, True),
+                ("mid", mid_reward, False),
+            ]
+            used_episodes: set[int] = set()
+            selected_rows = {}
+
+            for key, reward_value, prefer_max in selection_plan:
+                candidates = df_rewards[df_rewards["reward"] == reward_value].copy()
+                if candidates.empty:
+                    continue
+                candidates = candidates.sort_values(
+                    "episode", ascending=not prefer_max
+                )
+                row = None
+                for _, cand in candidates.iterrows():
+                    episode_id = int(cand["episode"])
+                    if episode_id in used_episodes:
+                        continue
+                    row = cand
+                    used_episodes.add(episode_id)
+                    break
+                if row is None:
+                    remaining = df_rewards[
+                        ~df_rewards["episode"].isin(used_episodes)
+                    ].copy()
+                    if remaining.empty:
+                        print(
+                            "Warning: insufficient distinct episodes for reward selection."
+                        )
+                        continue
+                    remaining = remaining.sort_values(
+                        "episode", ascending=not prefer_max
+                    )
+                    row = remaining.iloc[0]
+                    used_episodes.add(int(row["episode"]))
+                selected_rows[key] = row
+
+            for key in ("min", "mid", "max"):
+                row = selected_rows.get(key)
+                if row is None:
+                    continue
                 episode_id = row["episode"]
                 reward = row["reward"]
                 energy_j = (
@@ -613,12 +978,13 @@ def process_states(
                 # Format policy name
                 # policy_name: {spec_} {target}_{seed_number}_{percent}
                 base_name = (
-                    f"{policy}_{seed_name.replace('seed_', '')}_{int(p * 100)}"
+                    f"{policy}_{seed_name.replace('seed_', '')}_{label_by_key[key]}"
                 )
                 policy_name = f"{spec_prefix}_{base_name}" if spec_prefix else base_name
 
                 results.append(
                     {
+                        "spec": spec_prefix,
                         "policy_target": policy,
                         "policy_name": policy_name,
                         "reward": reward,
@@ -638,6 +1004,7 @@ def process_states(
         [
             {
                 "policy_target": result["policy_target"],
+                "spec": result.get("spec"),
                 "policy_name": result["policy_name"],
                 "reward": result["reward"],
                 "episode_id": result["episode_id"],

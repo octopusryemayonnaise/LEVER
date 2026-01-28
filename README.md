@@ -87,6 +87,8 @@ python plots/compare_compositions_average.py \
 Composition methods:
 - Default: Q-value sum (`--composition-method qsum`)
 - DAG-based ExNonZeroDiscount (`--composition-method exnonzero`)
+Note: empirically, both q-sum and ExNonZeroDiscount can be effective even when
+the base policies were trained with $\gamma \neq 0$.
 
 ## Search and Compose Policies
 ```bash
@@ -94,91 +96,102 @@ python search_faiss_policies.py "collect gold quickly"
 ```
 Optional filters and controls:
 - `--seed 0003` to search within a seed (required to stay in the same MDP layout).
-- `--filter-energy` to prefer low-energy policies.
 - `--no-decompose` to skip LLM decomposition.
 
 ## Reproducibility
-The following commands reproduce the core results in the order used for 16x16
-and 32x32 grids.
+The following commands reproduce the core results for 8x8 and 16x16 grids.
 
-1) Generate 16x16 policies:
+1) Generate 8x8 policies:
 ```bash
 python policy_reusability/data_generation/tabular/generate_states_batch.py \
-  --output-root state_runs
+  --output-root state_runs_8 \
+  --spec-set grid8
 ```
 
-2) Build π2vec assets (FAISS + regressor) for 16x16:
+2) Generate 16x16 policies:
+```bash
+python policy_reusability/data_generation/tabular/generate_states_batch.py \
+  --output-root state_runs_16 \
+  --spec-set grid16
+```
+
+3) Build π2vec assets (FAISS + regressor) for 8x8:
 ```bash
 python pi2vec_preparation.py \
-  --base-dir state_runs \
-  --index-path faiss_index/policy.index \
-  --metadata-path faiss_index/metadata.pkl \
-  --regressor-data-path data/regressor_training_data.json \
-  --regressor-model-path models/reward_regressor.pkl \
-  --regressor-plot-path plots/regression_plot.jpeg
+  --base-dir state_runs_8 \
+  --index-path faiss_index_8/policy.index \
+  --metadata-path faiss_index_8/metadata.pkl \
+  --regressor-data-path data_8/regressor_training_data.json \
+  --regressor-base-path models_8/reward_regressor_base.pkl \
+  --regressor-pair-path models_8/reward_regressor_pair.pkl \
+  --regressor-trip-path models_8/reward_regressor_trip.pkl \
+  --include-combined-rewards \
+  --split-regressor-by-spec
 ```
 
-3) Run hybrid top-k sweep to find the best k (or skip and use k=3):
+4) Build π2vec assets (FAISS + regressor) for 16x16:
+```bash
+python pi2vec_preparation.py \
+  --base-dir state_runs_16 \
+  --index-path faiss_index_16/policy.index \
+  --metadata-path faiss_index_16/metadata.pkl \
+  --regressor-data-path data_16/regressor_training_data.json \
+  --regressor-base-path models_16/reward_regressor_base.pkl \
+  --regressor-pair-path models_16/reward_regressor_pair.pkl \
+  --regressor-trip-path models_16/reward_regressor_trip.pkl \
+  --include-combined-rewards \
+  --split-regressor-by-spec
+```
+Note: keep the 8x8 and 16x16 predictor outputs (data/models) in distinct folders
+to avoid overwriting performance predictor models.
+
+5) Run full_experiment on 8x8:
+```bash
+python full_experiment.py \
+  --loop-specs \
+  --states-folder state_runs_8 \
+  --results-dir results_8 \
+  --index-path faiss_index_8/policy.index \
+  --metadata-path faiss_index_8/metadata.pkl \
+  --hybrid-top-k 3 \
+  --regressor-base-path models_8/reward_regressor_base.pkl \
+  --regressor-pair-path models_8/reward_regressor_pair.pkl \
+  --regressor-trip-path models_8/reward_regressor_trip.pkl
+```
+
+6) Run full_experiment on 16x16:
+```bash
+python full_experiment.py \
+  --loop-specs \
+  --states-folder state_runs_16 \
+  --results-dir results_16 \
+  --index-path faiss_index_16/policy.index \
+  --metadata-path faiss_index_16/metadata.pkl \
+  --hybrid-top-k 3 \
+  --regressor-base-path models_16/reward_regressor_base.pkl \
+  --regressor-pair-path models_16/reward_regressor_pair.pkl \
+  --regressor-trip-path models_16/reward_regressor_trip.pkl
+```
+
+7) Run hybrid top-k sweeps (optional):
 ```bash
 python hybrid_k_sweep.py \
-  --state-runs-dir state_runs \
-  --index-path faiss_index/policy.index \
-  --metadata-path faiss_index/metadata.pkl \
-  --regressor-model-path models/reward_regressor.pkl \
-  --output results/hybrid_k_sweep.csv
+  --state-runs-dir state_runs_8 \
+  --index-path faiss_index_8/policy.index \
+  --metadata-path faiss_index_8/metadata.pkl \
+  --regressor-base-path models_8/reward_regressor_base.pkl \
+  --regressor-pair-path models_8/reward_regressor_pair.pkl \
+  --regressor-trip-path models_8/reward_regressor_trip.pkl \
+  --output results_8/hybrid_k_sweep.csv
 
-python plots/hybrid_k_sweep_plot.py \
-  --input-csv results/hybrid_k_sweep.csv \
-  --results-dir results
-```
-Note: `plots/hybrid_k_sweep_plot.py` uses results from `full_experiment.py` to
-create plots.
-
-4) Run full_experiment on 16x16 with k=3:
-```bash
-python full_experiment.py \
-  --loop-specs \
-  --states-folder state_runs \
-  --results-dir results \
-  --index-path faiss_index/policy.index \
-  --metadata-path faiss_index/metadata.pkl \
-  --hybrid-top-k 3
-```
-
-5) Generate 32x32 policies:
-```bash
-python policy_reusability/data_generation/tabular/generate_states_batch.py \
-  --output-root state_runs_32 \
-  --spec-set grid32
-```
-
-6) Build π2vec assets for 32x32 without training a new regressor:
-```bash
-python pi2vec_preparation.py \
-  --base-dir state_runs_32 \
-  --index-path faiss_index_32/policy.index \
-  --metadata-path faiss_index_32/metadata.pkl \
-  --regressor-data-path data/regressor_training_data_32.json \
-  --regressor-model-path models/reward_regressor.pkl \
-  --skip-regressor
-```
-
-7) Run full_experiment on 32x32 using the 16x16 regressor:
-```bash
-python full_experiment.py \
-  --loop-specs \
-  --states-folder state_runs_32 \
-  --results-dir results_32 \
-  --index-path faiss_index_32/policy.index \
-  --metadata-path faiss_index_32/metadata.pkl \
-  --hybrid-top-k 3
-```
-
-8) Optionally plot the total results:
-```bash
-python plots/compare_compositions_average.py \
-  --results-dir results \
-  --output figs/average_results.png
+python hybrid_k_sweep.py \
+  --state-runs-dir state_runs_16 \
+  --index-path faiss_index_16/policy.index \
+  --metadata-path faiss_index_16/metadata.pkl \
+  --regressor-base-path models_16/reward_regressor_base.pkl \
+  --regressor-pair-path models_16/reward_regressor_pair.pkl \
+  --regressor-trip-path models_16/reward_regressor_trip.pkl \
+  --output results_16/hybrid_k_sweep.csv
 ```
 
 ## Project Structure

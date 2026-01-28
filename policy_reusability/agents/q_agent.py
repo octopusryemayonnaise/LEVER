@@ -74,9 +74,12 @@ class SarsaAgent:
             action = np.argmax(self.q_table[state])  # Exploit learned values
         return action
 
-    def update_q_table(self, state, action, reward, next_state, next_action):
+    def update_q_table(self, state, action, reward, next_state, next_action=None, done=False):
         old_value = self.q_table[state, action]
-        next_value = self.q_table[next_state, next_action]
+        if done or next_action is None:
+            next_value = 0.0
+        else:
+            next_value = self.q_table[next_state, next_action]
 
         new_value = (1 - self.learning_rate) * old_value + self.learning_rate * (
             reward + self.discount_factor * next_value

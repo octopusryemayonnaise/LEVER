@@ -16,8 +16,8 @@ def generate_random_policies(width, length, n, l, u):
     Output:
 
     A dictionary containing n individual dictionaries, each representing a policy. 
-    Each policy dictionary contains a list of two random variables, each falling within the range of l to u, 
-    for every possible state.
+    Each policy dictionary contains a list of four random variables, each falling within the range of l to u,
+    for every possible state (one per action).
     
     '''
     
@@ -27,9 +27,12 @@ def generate_random_policies(width, length, n, l, u):
         policy_dict = {}
         for i in range(width):
             for j in range(length):
-                policy_dict[(i, j)] = [round(random.uniform(l, u), 2), round(random.uniform(l, u), 2)]
+                policy_dict[(i, j)] = [
+                    round(random.uniform(l, u), 2),
+                    round(random.uniform(l, u), 2),
+                    round(random.uniform(l, u), 2),
+                    round(random.uniform(l, u), 2),
+                ]
         reward_dict[outer_key] = policy_dict
 
     return reward_dict
-
-

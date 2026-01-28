@@ -97,40 +97,112 @@ def get_color(index: int) -> str:
 
 
 # Grid generation specs used by data_generation/tabular scripts.
-# Keep separate spec sets for 16x16 and 32x32 runs.
+# Keep separate spec sets for 8x8, 16x16, and 32x32 runs.
+GRID_SPECS_8 = [
+    {
+        "name": "X1",
+        "grid_size": 8,
+        "num_golds": 6,
+        "num_blocks": 4,
+        "hazards": 4,
+        "episodes": 10_000,
+        "save_every": 1_000,
+        "seeds": 5,
+        "epsilon_decay": 0.99954,
+    },
+    {
+        "name": "X5",
+        "grid_size": 8,
+        "num_golds": 6,
+        "num_blocks": 4,
+        "hazards": 4,
+        "episodes": 50_000,
+        "save_every": 1_000,
+        "seeds": 5,
+        "epsilon_decay": 0.99991,  # matches X1 final epsilon over 50k steps
+    },
+    {
+        "name": "X10",
+        "grid_size": 8,
+        "num_golds": 6,
+        "num_blocks": 4,
+        "hazards": 4,
+        "episodes": 100_000,
+        "save_every": 1_000,
+        "seeds": 5,
+        "epsilon_decay": 0.99995,  # ~same final epsilon as X1 over 100k steps
+    },
+]
 GRID_SPECS_16 = [
     {
         "name": "X1",
         "grid_size": 16,
-        "num_golds": 50,
-        "num_blocks": 25,
-        "hazards": 30,
-        "episodes": 30_000,
+        "num_golds": 25,
+        "num_blocks": 15,
+        "hazards": 15,
+        "episodes": 10_000,
         "save_every": 1_000,
         "seeds": 5,
-        "epsilon_decay": 0.99995,
+        "epsilon_decay": 0.99954,
     },
     {
         "name": "X5",
         "grid_size": 16,
-        "num_golds": 50,
-        "num_blocks": 25,
-        "hazards": 30,
-        "episodes": 150_000,
+        "num_golds": 25,
+        "num_blocks": 15,
+        "hazards": 15,
+        "episodes": 50_000,
         "save_every": 1_000,
         "seeds": 5,
-        "epsilon_decay": 0.99997,  # matches X1 final epsilon over 150k steps
+        "epsilon_decay": 0.99991,  # matches X1 final epsilon over 50k steps
     },
     {
         "name": "X10",
         "grid_size": 16,
-        "num_golds": 50,
-        "num_blocks": 25,
-        "hazards": 30,
-        "episodes": 300_000,
+        "num_golds": 25,
+        "num_blocks": 15,
+        "hazards": 15,
+        "episodes": 100_000,
         "save_every": 1_000,
         "seeds": 5,
-        "epsilon_decay": 0.99999,  # ~same final epsilon as X1 over 300k steps
+        "epsilon_decay": 0.99995,  # ~same final epsilon as X1 over 100k steps
+    },
+]
+
+# 16x16 with the same object counts as 8x8 (small layout counts).
+GRID_SPECS_16_SMALL = [
+    {
+        "name": "X1",
+        "grid_size": 16,
+        "num_golds": 6,
+        "num_blocks": 4,
+        "hazards": 4,
+        "episodes": 10_000,
+        "save_every": 1_000,
+        "seeds": 5,
+        "epsilon_decay": 0.99954,
+    },
+    {
+        "name": "X5",
+        "grid_size": 16,
+        "num_golds": 6,
+        "num_blocks": 4,
+        "hazards": 4,
+        "episodes": 50_000,
+        "save_every": 1_000,
+        "seeds": 5,
+        "epsilon_decay": 0.99991,  # matches X1 final epsilon over 50k steps
+    },
+    {
+        "name": "X10",
+        "grid_size": 16,
+        "num_golds": 6,
+        "num_blocks": 4,
+        "hazards": 4,
+        "episodes": 100_000,
+        "save_every": 1_000,
+        "seeds": 5,
+        "epsilon_decay": 0.99995,  # ~same final epsilon as X1 over 100k steps
     },
 ]
 
@@ -139,35 +211,35 @@ GRID_SPECS_32 = [
     {
         "name": "X1",
         "grid_size": 32,
-        "num_golds": 50,
-        "num_blocks": 25,
-        "hazards": 30,
-        "episodes": 30_000,
+        "num_golds": 25,
+        "num_blocks": 15,
+        "hazards": 15,
+        "episodes": 10_000,
         "save_every": 1_000,
         "seeds": 5,
-        "epsilon_decay": 0.99995,
+        "epsilon_decay": 0.99954,
     },
     {
         "name": "X5",
         "grid_size": 32,
-        "num_golds": 50,
-        "num_blocks": 25,
-        "hazards": 30,
-        "episodes": 150_000,
+        "num_golds": 25,
+        "num_blocks": 15,
+        "hazards": 15,
+        "episodes": 50_000,
         "save_every": 1_000,
         "seeds": 5,
-        "epsilon_decay": 0.99997,  # matches X1 final epsilon over 150k steps
+        "epsilon_decay": 0.99991,  # matches X1 final epsilon over 50k steps
     },
     {
         "name": "X10",
         "grid_size": 32,
-        "num_golds": 50,
-        "num_blocks": 25,
-        "hazards": 30,
-        "episodes": 300_000,
+        "num_golds": 25,
+        "num_blocks": 15,
+        "hazards": 15,
+        "episodes": 100_000,
         "save_every": 1_000,
         "seeds": 5,
-        "epsilon_decay": 0.99999,  # ~same final epsilon as X1 over 300k steps
+        "epsilon_decay": 0.99995,  # ~same final epsilon as X1 over 100k steps
     },
 ]
 
@@ -178,8 +250,8 @@ GRID_SPECS = GRID_SPECS_16
 GRIDWORLD_AVAILABLE_ACTIONS = [
     "move right",
     "move down",
-    "move twice right",
-    "move twice down",
+    "move left",
+    "move up",
 ]
 
 # Policy sets for query decomposition
