@@ -134,8 +134,8 @@ def main():
     parser.add_argument(
         "--results-dir",
         type=str,
-        default="results",
-        help="Results directory to compute scratch baseline reward",
+        default=None,
+        help="Results directory to compute scratch/targeted/exhaustive baselines",
     )
     parser.add_argument(
         "--output",
@@ -146,11 +146,16 @@ def main():
     args = parser.parse_args()
 
     k_vals, rewards, times, min_candidates = load_sweep_csv(args.input_csv)
-    baseline_reward, baseline_time = load_scratch_baseline(args.results_dir)
-    decomp_override = _collect_decomp_override(args.results_dir)
-    te_baselines = load_targeted_exhaustive_baselines(
-        args.results_dir, decomp_override
-    )
+    if args.results_dir:
+        baseline_reward, baseline_time = load_scratch_baseline(args.results_dir)
+        decomp_override = _collect_decomp_override(args.results_dir)
+        te_baselines = load_targeted_exhaustive_baselines(
+            args.results_dir, decomp_override
+        )
+    else:
+        baseline_reward = baseline_time = None
+        decomp_override = None
+        te_baselines = None
     output_path = args.output
     if output_path is None:
         base = os.path.splitext(os.path.basename(args.input_csv))[0]

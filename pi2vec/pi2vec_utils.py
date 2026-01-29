@@ -920,9 +920,36 @@ def process_states(
                     used_episodes.add(int(row["episode"]))
                 selected_rows[key] = row
 
+            # Add 60% random snapshots (excluding episode 0 and already-selected episodes).
+            extra_rows = []
+            random_pool = df_rewards[
+                (~df_rewards["episode"].isin(used_episodes))
+                & (df_rewards["episode"] != 0)
+            ].copy()
+            if not random_pool.empty:
+                sample_count = int(len(random_pool) * 0.6)
+                if sample_count > 0:
+                    seed_int = int(seed_name.replace("seed_", ""))
+                    extra_rows = (
+                        random_pool.sample(n=sample_count, random_state=seed_int)
+                        .sort_values("episode")
+                        .to_dict("records")
+                    )
+
+            rows_to_process = []
             for key in ("min", "mid", "max"):
                 row = selected_rows.get(key)
                 if row is None:
+                    continue
+                label = label_by_key.get(key)
+                rows_to_process.append((row, label))
+            for row in extra_rows:
+                episode_id = int(row["episode"])
+                label = f"ep{episode_id}"
+                rows_to_process.append((row, label))
+
+            for row, label in rows_to_process:
+                if row is None or label is None:
                     continue
                 episode_id = row["episode"]
                 reward = row["reward"]
@@ -977,9 +1004,7 @@ def process_states(
 
                 # Format policy name
                 # policy_name: {spec_} {target}_{seed_number}_{percent}
-                base_name = (
-                    f"{policy}_{seed_name.replace('seed_', '')}_{label_by_key[key]}"
-                )
+                base_name = f"{policy}_{seed_name.replace('seed_', '')}_{label}"
                 policy_name = f"{spec_prefix}_{base_name}" if spec_prefix else base_name
 
                 results.append(

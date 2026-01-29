@@ -167,7 +167,7 @@ def main():
         # ======== Training parameters ========
         agent_type = "Sarsa"  # or "Q-learning"
         n_episodes = 300000
-        max_steps_per_episode = 4 * grid_world.grid_width * grid_world.grid_length
+        max_steps_per_episode = grid_world.grid_width * grid_world.grid_length
         learning_rate = 0.1
         discount_factor = 0.99
         result_step_size = 10

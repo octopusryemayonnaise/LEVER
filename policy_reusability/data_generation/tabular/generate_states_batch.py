@@ -28,7 +28,13 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from config import GRID_SPECS_8, GRID_SPECS_16, GRID_SPECS_16_SMALL, GRID_SPECS_32
+from config import (
+    GRID_SPECS_8,
+    GRID_SPECS_16,
+    GRID_SPECS_16_SCALED,
+    GRID_SPECS_16_SMALL,
+    GRID_SPECS_32,
+)
 from policy_reusability.agents.q_agent import SarsaAgent
 from policy_reusability.DAG import DAG
 from policy_reusability.env.gridworld import GridWorld
@@ -219,7 +225,7 @@ def evaluate_greedy(
     env.reset().flatten()
     state_index = env.state_to_index(env.agent_position)
     total_reward = 0.0
-    max_steps = 4 * spec["grid_size"] * spec["grid_size"]
+    max_steps = spec["grid_size"] * spec["grid_size"]
     for _ in range(max_steps):
         action = int(np.argmax(q_table[state_index, :]))
         _, reward, done, _ = env.step(action)
@@ -263,7 +269,7 @@ def train_seed(
     episode_rewards: List[Tuple[int, float]] = []
     episode_times: List[Tuple[int, float]] = []
     width = len(str(spec["episodes"] - 1))  # e.g., 6 digits for 300k
-    max_steps = 4 * spec["grid_size"] * spec["grid_size"]
+    max_steps = spec["grid_size"] * spec["grid_size"]
     cumulative_time = 0.0
     interval_start_time = time.time()
 
@@ -357,7 +363,7 @@ def train_seed(
         writer = csv.writer(f)
         writer.writerow(["", "episode", "reward", "time"])
         for idx, ((ep, rew), (_, t)) in enumerate(zip(episode_rewards, episode_times)):
-            rounded_rew = int(round(rew))
+            rounded_rew = round(float(rew), 3)
             writer.writerow([idx, ep, rounded_rew, t])
 
     # Final Q-table for convenience
@@ -378,7 +384,7 @@ def main():
     parser.add_argument(
         "--spec-set",
         type=str,
-        choices=["grid8", "grid16_small", "grid16", "grid32"],
+        choices=["grid8", "grid16_small", "grid16_scaled", "grid16", "grid32"],
         default="grid16",
         help="Grid spec set to use (default: grid16)",
     )
@@ -388,6 +394,8 @@ def main():
         grid_specs = GRID_SPECS_32
     elif args.spec_set == "grid16_small":
         grid_specs = GRID_SPECS_16_SMALL
+    elif args.spec_set == "grid16_scaled":
+        grid_specs = GRID_SPECS_16_SCALED
     elif args.spec_set == "grid8":
         grid_specs = GRID_SPECS_8
     else:

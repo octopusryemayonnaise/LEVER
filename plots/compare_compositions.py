@@ -148,8 +148,16 @@ def plot_reward_time(
             ax.set_yscale("log")
 
     handles, labels = axes[1].get_legend_handles_labels()
-    # Position legend above the "Targeted" column to use empty space.
-    axes[1].legend(handles, labels, loc="upper center", bbox_to_anchor=(0.38, 1.02))
+    # Position legend inside the axes near the upper-left (above Targeted),
+    # without overlapping the title.
+    axes[1].legend(
+        handles,
+        labels,
+        loc="upper left",
+        bbox_to_anchor=(0.0, 0.98),
+        bbox_transform=axes[1].transAxes,
+        borderaxespad=0.0,
+    )
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")

@@ -93,7 +93,7 @@ def bellman_loss(
     model: SuccessorFeatureModel,
     s: torch.Tensor,
     s_next: torch.Tensor,
-    gamma: float = 0.99,
+    gamma: float = 0.0,
 ) -> torch.Tensor:
     """
     Compute the Bellman loss for successor features.

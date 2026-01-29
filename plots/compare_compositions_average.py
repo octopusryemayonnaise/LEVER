@@ -207,7 +207,7 @@ def plot_average(results_dir: str, output_path: str, specs: list[str]):
     axes[1].set_yscale("log")
 
     handles, labels = axes[1].get_legend_handles_labels()
-    axes[1].legend(handles, labels, loc="upper left")
+    axes[1].legend(handles, labels, loc="upper center", bbox_to_anchor=(0.88, 1.02))
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")

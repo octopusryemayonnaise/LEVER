@@ -5,6 +5,10 @@ Train a regression model to predict reward from policy embeddings.
 import json
 import os
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -352,10 +356,26 @@ def load_model(model_path: str = "models/reward_regressor.pkl"):
         FileNotFoundError: If the model file doesn't exist
     """
     if not os.path.exists(model_path):
+        base_dir = os.path.dirname(model_path) or "."
+        base_name = os.path.basename(model_path)
+        candidates = []
+        for spec in ("X1", "X5", "X10"):
+            cand = os.path.join(base_dir, spec, base_name)
+            if os.path.exists(cand):
+                candidates.append(cand)
+        extra_hint = ""
+        if candidates:
+            example = os.path.join(base_dir, "{spec}", base_name)
+            extra_hint = (
+                "\nModels were found in per-spec subfolders. "
+                "Pass a spec-specific path or use the {spec} placeholder, e.g. "
+                f"{example}."
+            )
         raise FileNotFoundError(
             f"Model file not found: {model_path}\n"
-            "The regressor model hasn't been trained yet.\n"
+            "The regressor model hasn't been trained yet, or it was saved per-spec.\n"
             "Please run 'python pi2vec/train_regressor.py' first to train and save the model."
+            f"{extra_hint}"
         )
 
     model = joblib.load(model_path)

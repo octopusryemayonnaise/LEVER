@@ -69,6 +69,7 @@ def group_candidates_for_subqueries(
     retriever: PolicyRetriever,
     sub_queries: list[str],
     seed: str,
+    spec: str | None = None,
     similarity_threshold: float = 0.7,
     search_k: int = 5,
 ) -> tuple[list[list[dict]], float]:
@@ -77,7 +78,7 @@ def group_candidates_for_subqueries(
 
     for sq in sub_queries:
         result_dict, timing = retriever.vdb.search_similar_policies(
-            sq, k=search_k, policy_seed=seed
+            sq, k=search_k, policy_seed=seed, policy_spec=spec
         )
         if isinstance(timing, dict):
             total_search_time += timing.get("total_time", 0.0)
@@ -86,22 +87,7 @@ def group_candidates_for_subqueries(
 
         results = result_dict.get("results", [])
         results = [r for r in results if r.get("score", 0) > similarity_threshold]
-        scored = []
-        for r in results:
-            emb = retriever.get_policy_embedding(r)
-            if emb is None:
-                continue
-            if isinstance(emb, list):
-                emb = np.array(emb)
-            if retriever.regressor_model:
-                expected = getattr(retriever.regressor_model, "n_features_in_", None)
-                if expected is not None and emb.shape[0] != expected:
-                    continue
-                pred = float(retriever.regressor_model.predict(emb.reshape(1, -1))[0])
-            else:
-                pred = 0.0
-            r["regressor_score"] = pred
-            scored.append(r)
+        scored = score_candidates(results, retriever)
 
         scored = sorted(
             scored, key=lambda x: x.get("regressor_score", -1), reverse=True
@@ -109,6 +95,35 @@ def group_candidates_for_subqueries(
         grouped.append(scored)
 
     return grouped, total_search_time
+
+
+def score_candidates(results: list[dict], retriever: PolicyRetriever) -> list[dict]:
+    if not results:
+        return results
+    if retriever.regressor_model is None:
+        for r in results:
+            r["regressor_score"] = 0.0
+        return results
+
+    expected = getattr(retriever.regressor_model, "n_features_in_", None)
+    embeddings = []
+    indices = []
+    for idx, r in enumerate(results):
+        emb = retriever.get_policy_embedding(r)
+        if emb is None:
+            continue
+        if isinstance(emb, list):
+            emb = np.array(emb)
+        if expected is not None and emb.shape[0] != expected:
+            continue
+        embeddings.append(emb)
+        indices.append(idx)
+
+    if embeddings:
+        preds = retriever.regressor_model.predict(np.stack(embeddings, axis=0))
+        for idx, pred in zip(indices, preds):
+            results[idx]["regressor_score"] = float(pred)
+    return results
 
 
 def best_hybrid_from_groups(
@@ -403,6 +418,7 @@ def main():
                         retriever,
                         sub_queries,
                         seed_name,
+                        spec=spec,
                         similarity_threshold=args.similarity_threshold,
                         search_k=args.search_k,
                     )

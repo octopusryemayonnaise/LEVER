@@ -206,6 +206,43 @@ GRID_SPECS_16_SMALL = [
     },
 ]
 
+# 16x16 with object counts scaled from 8x8 (area ratio 4x).
+GRID_SPECS_16_SCALED = [
+    {
+        "name": "X1",
+        "grid_size": 16,
+        "num_golds": 24,
+        "num_blocks": 16,
+        "hazards": 16,
+        "episodes": 10_000,
+        "save_every": 1_000,
+        "seeds": 5,
+        "epsilon_decay": 0.99954,
+    },
+    {
+        "name": "X5",
+        "grid_size": 16,
+        "num_golds": 24,
+        "num_blocks": 16,
+        "hazards": 16,
+        "episodes": 50_000,
+        "save_every": 1_000,
+        "seeds": 5,
+        "epsilon_decay": 0.99991,  # matches X1 final epsilon over 50k steps
+    },
+    {
+        "name": "X10",
+        "grid_size": 16,
+        "num_golds": 24,
+        "num_blocks": 16,
+        "hazards": 16,
+        "episodes": 100_000,
+        "save_every": 1_000,
+        "seeds": 5,
+        "epsilon_decay": 0.99995,  # ~same final epsilon as X1 over 100k steps
+    },
+]
+
 # 32x32 uses the same counts to keep the state vector shape consistent.
 GRID_SPECS_32 = [
     {

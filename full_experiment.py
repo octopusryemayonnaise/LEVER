@@ -163,7 +163,7 @@ def greedy_eval(
 ) -> float:
     env.reset().flatten()
     if max_steps is None:
-        max_steps = 4 * env.grid_length * env.grid_width
+        max_steps = env.grid_length * env.grid_width
     total_reward = 0.0
     state_index = env.state_to_index(env.agent_position)
     for _ in range(max_steps):
@@ -182,7 +182,7 @@ def generate_transitions(
     """Greedy rollout transitions (state_vec, next_state_vec) matching generate_states_batch."""
     env.reset().flatten()
     if max_steps is None:
-        max_steps = 4 * env.grid_length * env.grid_width
+        max_steps = env.grid_length * env.grid_width
     episode_states = [np.copy(env.grid)]
     state_index = env.state_to_index(env.agent_position)
     for _ in range(max_steps):
@@ -347,22 +347,42 @@ def decomposed_candidates(
         results = result_dict.get("results", [])
         # Apply similarity filter
         results = [r for r in results if r.get("score", 0) > similarity_threshold]
-        for r in results:
-            emb = retriever.get_policy_embedding(r)
-            if emb is None:
+        scored = score_candidates(results, retriever)
+        for r in scored:
+            if "regressor_score" not in r:
                 continue
-            if isinstance(emb, list):
-                emb = np.array(emb)
-            if retriever.regressor_model:
-                expected = getattr(retriever.regressor_model, "n_features_in_", None)
-                if expected is not None and emb.shape[0] != expected:
-                    continue
-                pred = float(retriever.regressor_model.predict(emb.reshape(1, -1))[0])
-            else:
-                pred = 0.0
-            r["regressor_score"] = pred
             candidates.append(r)
     return candidates, time.time() - start
+
+
+def score_candidates(results: list[dict], retriever: PolicyRetriever) -> list[dict]:
+    """Score candidates in a single batch to avoid per-item regressor calls."""
+    if not results:
+        return results
+    if retriever.regressor_model is None:
+        for r in results:
+            r["regressor_score"] = 0.0
+        return results
+
+    expected = getattr(retriever.regressor_model, "n_features_in_", None)
+    embeddings = []
+    indices = []
+    for idx, r in enumerate(results):
+        emb = retriever.get_policy_embedding(r)
+        if emb is None:
+            continue
+        if isinstance(emb, list):
+            emb = np.array(emb)
+        if expected is not None and emb.shape[0] != expected:
+            continue
+        embeddings.append(emb)
+        indices.append(idx)
+
+    if embeddings:
+        preds = retriever.regressor_model.predict(np.stack(embeddings, axis=0))
+        for idx, pred in zip(indices, preds):
+            results[idx]["regressor_score"] = float(pred)
+    return results
 
 
 def targeted_composition(
@@ -382,20 +402,7 @@ def targeted_composition(
             search_time += timing
         results = result_dict.get("results", [])
         results = [r for r in results if r.get("score", 0) > 0.7]
-        for r in results:
-            emb = retriever.get_policy_embedding(r)
-            if emb is None:
-                continue
-            if isinstance(emb, list):
-                emb = np.array(emb)
-            if retriever.regressor_model:
-                expected = getattr(retriever.regressor_model, "n_features_in_", None)
-                if expected is not None and emb.shape[0] != expected:
-                    continue
-                pred = float(retriever.regressor_model.predict(emb.reshape(1, -1))[0])
-            else:
-                pred = 0.0
-            r["regressor_score"] = pred
+        results = score_candidates(results, retriever)
         results = sorted(
             results, key=lambda x: x.get("regressor_score", -1), reverse=True
         )
@@ -623,20 +630,7 @@ def hybrid_composition(
             search_time += timing
         results = result_dict.get("results", [])
         results = [r for r in results if r.get("score", 0) > similarity_threshold]
-        for r in results:
-            emb = retriever.get_policy_embedding(r)
-            if emb is None:
-                continue
-            if isinstance(emb, list):
-                emb = np.array(emb)
-            if retriever.regressor_model:
-                expected = getattr(retriever.regressor_model, "n_features_in_", None)
-                if expected is not None and emb.shape[0] != expected:
-                    continue
-                pred = float(retriever.regressor_model.predict(emb.reshape(1, -1))[0])
-            else:
-                pred = 0.0
-            r["regressor_score"] = pred
+        results = score_candidates(results, retriever)
         results = sorted(
             results, key=lambda x: x.get("regressor_score", -1), reverse=True
         )
