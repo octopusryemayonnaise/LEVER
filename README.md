@@ -87,6 +87,8 @@ python plots/compare_compositions_average.py \
 Composition methods:
 - Default: Q-value sum (`--composition-method qsum`)
 - DAG-based ExNonZeroDiscount (`--composition-method exnonzero`)
+Note: empirically, both q-sum and ExNonZeroDiscount can be effective even when
+the base policies were trained with $\gamma \neq 0$.
 
 ## Search and Compose Policies
 ```bash
@@ -94,7 +96,6 @@ python search_faiss_policies.py "collect gold quickly"
 ```
 Optional filters and controls:
 - `--seed 0003` to search within a seed (required to stay in the same MDP layout).
-- `--filter-energy` to prefer low-energy policies.
 - `--no-decompose` to skip LLM decomposition.
 
 ## Reproducibility
@@ -103,6 +104,8 @@ Optional filters and controls:
  - **ExZero (support-limited)** results are reproduced from the `v3` branch.
 
 ### ExZero results (v3 branch)
+
+Note: `{spec}` is a placeholder for `X1`, `X5`, or `X10`.
 
 #### A) 16x16 GridWorld (scaled counts, main experiments)
 1) Generate policies:
